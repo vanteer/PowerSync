@@ -429,7 +429,13 @@ logging.getLogger("custom_components.power_sync.inverters.sigenergy").setLevel(l
 logging.getLogger("custom_components.power_sync.websocket_client").setLevel(logging.DEBUG)
 logging.getLogger("custom_components.power_sync.tariff_converter").setLevel(logging.DEBUG)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH, Platform.SELECT]
+PLATFORMS: list[Platform] = [
+    Platform.SENSOR,
+    Platform.SWITCH,
+    Platform.SELECT,
+    Platform.NUMBER,
+    Platform.TIME,
+]
 
 # Storage version for persisting data across HA restarts
 STORAGE_VERSION = 1
@@ -10307,6 +10313,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ) as response:
                 if response.status == 200:
                     _LOGGER.info(f"✅ Grid export rule set to {rule}")
+                    
                     # If solar curtailment is enabled, mark this as a manual override
                     solar_curtailment_enabled = entry.options.get(
                         CONF_BATTERY_CURTAILMENT_ENABLED,

@@ -33,32 +33,28 @@ async def async_setup_entry(
             CONF_ABC_NIGHT_START,
             "ABC Night Start",
             DEFAULT_ABC_NIGHT_START,
-            "mdi:weather-night",
-            "power_sync_abc_night_start"
+            "mdi:weather-night"
         ),
         PowerSyncABCTime(
             entry,
             CONF_ABC_NIGHT_END,
             "ABC Night End",
             DEFAULT_ABC_NIGHT_END,
-            "mdi:weather-sunset-up",
-            "power_sync_abc_night_end"
+            "mdi:weather-sunset-up"
         ),
         PowerSyncABCTime(
             entry,
             CONF_ABC_EVENING_PEAK_START,
             "ABC Evening Peak Start",
             DEFAULT_ABC_EVENING_PEAK_START,
-            "mdi:peak-performance",
-            "power_sync_abc_evening_peak_start"
+            "mdi:peak-performance"
         ),
         PowerSyncABCTime(
             entry,
             CONF_ABC_EVENING_PEAK_END,
             "ABC Evening Peak End",
             DEFAULT_ABC_EVENING_PEAK_END,
-            "mdi:peak-performance",
-            "power_sync_abc_evening_peak_end"
+            "mdi:peak-performance"
         ),
     ]
     async_add_entities(entities)
@@ -76,14 +72,12 @@ class PowerSyncABCTime(TimeEntity):
         name: str,
         default_value: str,
         icon: str | None = None,
-        suggested_object_id: str | None = None,
     ) -> None:
         self._entry = entry
         self._key = key
         self._attr_name = name
         self._attr_icon = icon
         self._attr_unique_id = f"{entry.entry_id}_{key}"
-        self._attr_suggested_object_id = suggested_object_id
         
         # Initial value parsing
         t_str = entry.options.get(key, default_value)

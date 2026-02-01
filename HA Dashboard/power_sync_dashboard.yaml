@@ -7,39 +7,39 @@ views:
       - type: horizontal-stack
         cards:
           - type: gauge
-            entity: sensor.power_sync_current_import_price
+            entity: sensor.current_import_price_cents
             name: Import
-            unit: $/kWh
+            unit: ¢/kWh
             min: 0
-            max: 0.6
+            max: 60
             needle: true
             severity:
               green: 0
-              yellow: 0.25
-              red: 0.4
+              yellow: 25
+              red: 40
             card_mod:
               style: |
                 ha-card {
                   height: 140px;
                 }
           - type: gauge
-            entity: sensor.power_sync_current_export_price
+            entity: sensor.current_export_price_cents
             name: Export Earnings
-            unit: $/kWh
-            min: -0.1
-            max: 0.3
+            unit: ¢/kWh
+            min: -10
+            max: 30
             needle: true
             severity:
-              red: -0.1
+              red: -10
               yellow: 0
-              green: 0.05
+              green: 5
             card_mod:
               style: |
                 ha-card {
                   height: 140px;
                 }
           - type: gauge
-            entity: sensor.power_sync_battery_level
+            entity: sensor.battery_level
             name: Battery
             unit: '%'
             min: 0
@@ -279,10 +279,10 @@ views:
               labels:
                 formatter: |
                   EVAL:function(val) {
-                    return (val * 100).toFixed(0) + '¢';
+                    return val.toFixed(0) + '¢';
                   }
         series:
-          - entity: sensor.current_import_price
+          - entity: sensor.current_import_price_cents
             name: Import
             type: line
             color: '#FF9800'
@@ -292,7 +292,7 @@ views:
             group_by:
               func: avg
               duration: 5min
-          - entity: sensor.current_export_price
+          - entity: sensor.current_export_price_cents
             name: Export Earnings
             type: line
             color: '#4CAF50'
@@ -317,11 +317,10 @@ views:
               formatter: |
                 EVAL:function(value) {
                   if (value === null || value === undefined) return '';
-                  const cents = value * 100;
-                  if (Math.abs(cents) >= 1000) {
-                    return '$' + value.toFixed(2);
+                  if (Math.abs(value) >= 1000) {
+                    return '$' + (value / 100).toFixed(2);
                   }
-                  return cents.toFixed(0) + '¢';
+                  return value.toFixed(0) + '¢';
                 }
       - type: custom:apexcharts-card
         header:

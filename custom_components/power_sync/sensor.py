@@ -112,7 +112,6 @@ class PowerSyncSensorEntityDescription(SensorEntityDescription):
 
     value_fn: Callable[[Any], Any] | None = None
     attr_fn: Callable[[Any], dict[str, Any]] | None = None
-    suggested_object_id: str | None = None
 
 
 def _get_import_price(data):
@@ -175,7 +174,6 @@ PRICE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.MONETARY,
         suggested_display_precision=4,
         value_fn=_get_import_price,
-        suggested_object_id="power_sync_current_import_price",
         attr_fn=lambda data: {
             ATTR_PRICE_SPIKE: data.get("current", [{}])[0].get("spikeStatus")
             if data and data.get("current")
@@ -196,7 +194,6 @@ PRICE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         suggested_display_precision=4,
         icon="mdi:transmission-tower-export",
         value_fn=_get_export_price,
-        suggested_object_id="power_sync_current_export_price",
         attr_fn=lambda data: {
             "channel_type": "feedIn",
         },
@@ -207,7 +204,6 @@ PRICE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         native_unit_of_measurement=f"¢/{UnitOfEnergy.KILO_WATT_HOUR}",
         suggested_display_precision=1,
         value_fn=_get_import_price_cents,
-        suggested_object_id="power_sync_current_import_price_cents",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_CURRENT_EXPORT_PRICE_CENTS,
@@ -216,7 +212,6 @@ PRICE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         suggested_display_precision=1,
         icon="mdi:transmission-tower-export",
         value_fn=_get_export_price_cents,
-        suggested_object_id="power_sync_current_export_price_cents",
     ),
 )
 
@@ -229,7 +224,6 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=3,
         value_fn=lambda data: data.get("solar_power") if data else None,
-        suggested_object_id="power_sync_solar_power",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_GRID_POWER,
@@ -239,7 +233,6 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=3,
         value_fn=lambda data: data.get("grid_power") if data else None,
-        suggested_object_id="power_sync_grid_power",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_BATTERY_POWER,
@@ -249,7 +242,6 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=3,
         value_fn=lambda data: data.get("battery_power") if data else None,
-        suggested_object_id="power_sync_battery_power",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_HOME_LOAD,
@@ -259,7 +251,6 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=3,
         value_fn=lambda data: data.get("load_power") if data else None,
-        suggested_object_id="power_sync_home_load",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_BATTERY_LEVEL,
@@ -269,7 +260,6 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=1,
         value_fn=lambda data: data.get("battery_level") if data else None,
-        suggested_object_id="power_sync_battery_level",
     ),
 )
 
@@ -278,7 +268,6 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         key=SENSOR_TYPE_IN_DEMAND_CHARGE_PERIOD,
         name="In Demand Charge Period",
         value_fn=lambda data: data.get("in_peak_period", False) if data else False,
-        suggested_object_id="power_sync_in_demand_charge_period",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_PEAK_DEMAND_THIS_CYCLE,
@@ -288,7 +277,6 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=3,
         value_fn=lambda data: data.get("peak_demand_kw", 0.0) if data else 0.0,
-        suggested_object_id="power_sync_peak_demand_this_cycle",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DEMAND_CHARGE_COST,
@@ -297,7 +285,6 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.MONETARY,
         suggested_display_precision=2,
         value_fn=lambda data: data.get("estimated_cost", 0.0) if data else 0.0,
-        suggested_object_id="power_sync_demand_charge_cost",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_SUPPLY_CHARGE_COST,
@@ -307,7 +294,6 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL,  # MONETARY only supports 'total', not 'total_increasing'
         suggested_display_precision=2,
         value_fn=lambda data: data.get("daily_supply_charge_cost", 0.0) if data else 0.0,
-        suggested_object_id="power_sync_daily_supply_charge_cost",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_MONTHLY_SUPPLY_CHARGE,
@@ -316,7 +302,6 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.MONETARY,
         suggested_display_precision=2,
         value_fn=lambda data: data.get("monthly_supply_charge", 0.0) if data else 0.0,
-        suggested_object_id="power_sync_monthly_supply_charge",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_TOTAL_MONTHLY_COST,
@@ -326,7 +311,6 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL,
         suggested_display_precision=2,
         value_fn=lambda data: data.get("total_monthly_cost", 0.0) if data else 0.0,
-        suggested_object_id="power_sync_total_monthly_cost",
     ),
 )
 
@@ -345,7 +329,6 @@ AEMO_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             ATTR_AEMO_THRESHOLD: data.get("threshold") if data else None,
             "last_check": data.get("last_check") if data else None,
         },
-        suggested_object_id="power_sync_aemo_wholesale_price",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_AEMO_SPIKE_STATUS,
@@ -358,7 +341,6 @@ AEMO_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             ATTR_SPIKE_START_TIME: data.get("spike_start_time") if data else None,
             "last_price": data.get("last_price") if data else None,
         },
-        suggested_object_id="power_sync_aemo_spike_status",
     ),
 )
 
@@ -380,7 +362,6 @@ SOLCAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             "last_update": data.get("last_update").isoformat() if data and data.get("last_update") else None,
             "source": data.get("source", "api") if data else None,  # "solcast_integration" or "api"
         } if data else {},
-        suggested_object_id="power_sync_solcast_today",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_SOLCAST_TOMORROW,
@@ -393,7 +374,6 @@ SOLCAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         attr_fn=lambda data: {
             "peak_kw": data.get("tomorrow_peak_kw") if data else None,
         } if data else {},
-        suggested_object_id="power_sync_solcast_tomorrow",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_SOLCAST_CURRENT,
@@ -407,7 +387,6 @@ SOLCAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         attr_fn=lambda data: {
             "forecast_periods": data.get("forecast_periods") if data else None,
         } if data else {},
-        suggested_object_id="power_sync_solcast_current",
     ),
 )
 
@@ -578,8 +557,6 @@ class AmberPriceSensor(CoordinatorEntity, SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
-        if description.suggested_object_id:
-            self._attr_suggested_object_id = description.suggested_object_id
 
     @property
     def native_value(self) -> Any:
@@ -612,8 +589,6 @@ class TeslaEnergySensor(CoordinatorEntity, SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
-        if description.suggested_object_id:
-            self._attr_suggested_object_id = description.suggested_object_id
 
     @property
     def native_value(self) -> Any:
@@ -639,8 +614,6 @@ class DemandChargeSensor(CoordinatorEntity, SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
-        if description.suggested_object_id:
-            self._attr_suggested_object_id = description.suggested_object_id
         self._entry = entry
 
     @property
@@ -693,8 +666,6 @@ class AEMOSpikeSensor(SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
-        if description.suggested_object_id:
-            self._attr_suggested_object_id = description.suggested_object_id
 
     @property
     def native_value(self) -> Any:
@@ -727,8 +698,6 @@ class SolcastForecastSensor(CoordinatorEntity, SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
-        if description.suggested_object_id:
-            self._attr_suggested_object_id = description.suggested_object_id
 
     @property
     def native_value(self) -> Any:
@@ -763,7 +732,6 @@ class TariffScheduleSensor(SensorEntity):
         self._attr_has_entity_name = True
         self._attr_name = "Tariff Schedule"
         self._attr_icon = "mdi:calendar-clock"
-        self._attr_suggested_object_id = "power_sync_tariff_schedule"
         self._unsub_dispatcher = None
 
     async def async_added_to_hass(self) -> None:
@@ -796,9 +764,15 @@ class TariffScheduleSensor(SensorEntity):
 
     @property
     def native_value(self) -> Any:
-        """Return the state - number of periods in schedule."""
+        """Return the state - current tariff period or last sync time."""
         tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
         if tariff_data:
+            # For Tesla/Globird users, show current period and price
+            current_period = tariff_data.get("current_period")
+            buy_price = tariff_data.get("buy_price")
+            if current_period and buy_price is not None:
+                return f"{current_period} ({buy_price}c/kWh)"
+            # Fallback to last sync time
             return tariff_data.get("last_sync", "Unknown")
         return "Not synced"
 
@@ -809,33 +783,81 @@ class TariffScheduleSensor(SensorEntity):
         if not tariff_data:
             return {}
 
-        attributes = {
-            "last_sync": tariff_data.get("last_sync"),
-            "period_count": len(tariff_data.get("buy_prices", {})),
-        }
-
-        # Add buy and sell prices as individual attributes for easy access
+        # Support both Amber format (buy_prices with PERIOD_HH_MM keys)
+        # and Tesla/Globird format (buy_rates with TOU period names)
         buy_prices = tariff_data.get("buy_prices", {})
         sell_prices = tariff_data.get("sell_prices", {})
+        buy_rates = tariff_data.get("buy_rates", {})
+        sell_rates = tariff_data.get("sell_rates", {})
+        tou_periods = tariff_data.get("tou_periods", {})
 
-        # Create a list format suitable for apexcharts-card visualization
-        # Format: list of {time: "HH:MM", buy: price, sell: price}
-        schedule_list = []
-        for period_key in sorted(buy_prices.keys()):
-            # Convert PERIOD_HH_MM to HH:MM
-            parts = period_key.replace("PERIOD_", "").split("_")
-            time_str = f"{parts[0]}:{parts[1]}"
-            schedule_list.append({
-                "time": time_str,
-                "buy": buy_prices.get(period_key, 0),
-                "sell": sell_prices.get(period_key, 0),
-            })
+        attributes = {
+            "last_sync": tariff_data.get("last_sync"),
+            "utility": tariff_data.get("utility"),
+            "plan_name": tariff_data.get("plan_name"),
+            "current_period": tariff_data.get("current_period"),
+            "current_season": tariff_data.get("current_season"),
+        }
 
-        attributes["schedule"] = schedule_list
+        # Amber format: PERIOD_HH_MM keys with 30-min granularity
+        if buy_prices:
+            attributes["period_count"] = len(buy_prices)
+            # Create a list format suitable for apexcharts-card visualization
+            schedule_list = []
+            for period_key in sorted(buy_prices.keys()):
+                # Convert PERIOD_HH_MM to HH:MM
+                parts = period_key.replace("PERIOD_", "").split("_")
+                time_str = f"{parts[0]}:{parts[1]}"
+                schedule_list.append({
+                    "time": time_str,
+                    "buy": buy_prices.get(period_key, 0),
+                    "sell": sell_prices.get(period_key, 0),
+                })
+            attributes["schedule"] = schedule_list
+            attributes["buy_prices"] = buy_prices
+            attributes["sell_prices"] = sell_prices
 
-        # Also add raw dicts for flexibility
-        attributes["buy_prices"] = buy_prices
-        attributes["sell_prices"] = sell_prices
+        # Tesla/Globird format: TOU period names (ON_PEAK, OFF_PEAK, etc.)
+        elif buy_rates:
+            attributes["period_count"] = len(buy_rates)
+
+            # Create TOU schedule list with period names and rates
+            tou_schedule = []
+            for period_name, rate in buy_rates.items():
+                # Convert rate from $/kWh to c/kWh if needed
+                buy_cents = rate * 100 if rate < 1 else rate
+                sell_rate = sell_rates.get(period_name, 0)
+                sell_cents = sell_rate * 100 if sell_rate < 1 else sell_rate
+
+                # Get time windows for this period
+                period_times = tou_periods.get(period_name, [])
+                time_windows = []
+                for window in period_times if isinstance(period_times, list) else []:
+                    from_hour = window.get("fromHour", 0)
+                    to_hour = window.get("toHour", 24)
+                    from_dow = window.get("fromDayOfWeek", 0)
+                    to_dow = window.get("toDayOfWeek", 6)
+                    time_windows.append({
+                        "from_hour": from_hour,
+                        "to_hour": to_hour,
+                        "from_day": from_dow,
+                        "to_day": to_dow,
+                    })
+
+                tou_schedule.append({
+                    "period": period_name,
+                    "buy": round(buy_cents, 2),
+                    "sell": round(sell_cents, 2),
+                    "windows": time_windows,
+                })
+
+            attributes["tou_schedule"] = tou_schedule
+            attributes["buy_rates"] = {k: round(v * 100 if v < 1 else v, 2) for k, v in buy_rates.items()}
+            attributes["sell_rates"] = {k: round(v * 100 if v < 1 else v, 2) for k, v in sell_rates.items()}
+
+            # Add current buy/sell prices in cents
+            attributes["buy_price"] = tariff_data.get("buy_price")
+            attributes["sell_price"] = tariff_data.get("sell_price")
 
         return attributes
 
@@ -858,7 +880,6 @@ class SolarCurtailmentSensor(SensorEntity):
         self._attr_has_entity_name = True
         self._attr_name = "DC Solar Curtailment"
         self._attr_icon = "mdi:solar-power-variant"
-        self._attr_suggested_object_id = "power_sync_solar_curtailment"
         self._unsub_dispatcher = None
 
     async def async_added_to_hass(self) -> None:
@@ -976,7 +997,6 @@ class InverterStatusSensor(SensorEntity):
         self._attr_has_entity_name = True
         self._attr_name = "Inverter Status"
         self._attr_icon = "mdi:solar-panel"
-        self._attr_suggested_object_id = "power_sync_inverter_status"
         self._unsub_dispatcher = None
         self._unsub_interval = None
         self._cached_state = None
@@ -1273,12 +1293,6 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
         self._sensor_type = sensor_type
         self._attr_unique_id = f"{entry.entry_id}_{sensor_type}"
         self._attr_has_entity_name = True
-        
-        # Explicitly set object ID for stable entity IDs
-        if sensor_type == SENSOR_TYPE_FLOW_POWER_PRICE:
-            self._attr_suggested_object_id = "current_import_price"
-        else:
-            self._attr_suggested_object_id = "current_export_price"
 
         # Configure based on sensor type
         if sensor_type == SENSOR_TYPE_FLOW_POWER_PRICE:
@@ -1437,7 +1451,6 @@ class BatteryHealthSensor(SensorEntity):
         """Initialize the sensor."""
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{SENSOR_TYPE_BATTERY_HEALTH}"
-        self._attr_suggested_object_id = "power_sync_battery_health"
 
         # Battery health data (from service call)
         self._original_capacity_wh: float | None = None

@@ -2,7 +2,7 @@
 Action execution logic for HA automations.
 
 Supported actions:
-- set_backup_reserve: Set battery backup reserve percentage (Tesla only)
+- set_backup_reserve: Set battery backup reserve percentage (Tesla/Sigenergy)
 - preserve_charge: Prevent battery discharge (Tesla: set export to "never", Sigenergy: set discharge to 0)
 - set_operation_mode: Set Powerwall operation mode (Tesla only)
 - force_discharge: Force battery discharge for a duration (Tesla/Sigenergy)
@@ -55,7 +55,11 @@ from ..const import (
 _LOGGER = logging.getLogger(__name__)
 
 # Tesla integrations supported for EV control via Fleet API
-TESLA_EV_INTEGRATIONS = ["tesla_fleet", "teslemetry"]
+from ..const import TESLA_INTEGRATIONS
+TESLA_EV_INTEGRATIONS = TESLA_INTEGRATIONS
+
+# Global lock to prevent concurrent wake/charging attempts
+_ev_wake_lock: Dict[str, bool] = {}  # vehicle_id -> is_waking
 
 
 def _is_sigenergy(config_entry: ConfigEntry) -> bool:
@@ -85,8 +89,31 @@ async def _get_tesla_ev_entity(
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
 
+    # EV-specific entity patterns that only vehicles have (not energy products)
+    ev_entity_markers = [
+        r"button\..*_charge",  # charge_start, force_data_update
+        r"switch\..*_charge$",  # charger switch
+        r"number\..*_charge_limit",  # charge limit
+        r"number\..*_charging_amps",  # charging amps
+        r"sensor\..*_battery_level$",  # vehicle battery (not Powerwall)
+        r"device_tracker\.",  # vehicle location
+    ]
+    ev_marker_patterns = [re.compile(p, re.IGNORECASE) for p in ev_entity_markers]
+
+    def _device_has_ev_entities(device_id: str) -> bool:
+        """Check if device has EV-specific entities."""
+        for entity in entity_registry.entities.values():
+            if entity.device_id == device_id:
+                for marker in ev_marker_patterns:
+                    if marker.search(entity.entity_id):
+                        return True
+        return False
+
     # Find devices from Tesla integrations
     tesla_devices = []
+    all_domains_found = set()
+    all_tesla_domain_devices = []  # Track all devices from Tesla domains
+
     for device in device_registry.devices.values():
         for identifier in device.identifiers:
             # Use index access instead of tuple unpacking (identifiers can have >2 values)
@@ -94,15 +121,41 @@ async def _get_tesla_ev_entity(
                 continue
             domain = identifier[0]
             identifier_value = identifier[1]
+            all_domains_found.add(domain)
             if domain in TESLA_EV_INTEGRATIONS:
-                # Check if it's a vehicle (VIN is 17 chars, non-numeric)
-                if len(str(identifier_value)) == 17 and not str(identifier_value).isdigit():
-                    if vehicle_vin is None or identifier_value == vehicle_vin:
+                id_str = str(identifier_value)
+                id_len = len(id_str)
+                is_all_digit = id_str.isdigit()
+                _LOGGER.debug(f"Tesla domain device: {device.name}, domain={domain}, id={id_str}, len={id_len}, all_digit={is_all_digit}")
+
+                all_tesla_domain_devices.append((device, domain, id_str))
+
+                # Check if it's a vehicle (VIN is 17 chars, not all numeric)
+                if id_len == 17 and not is_all_digit:
+                    if vehicle_vin is None or id_str == vehicle_vin:
                         tesla_devices.append(device)
+                        _LOGGER.info(f"Found Tesla EV vehicle by VIN: {device.name}, VIN: {id_str}")
                         break
+                    else:
+                        _LOGGER.debug(f"Tesla device VIN format OK but doesn't match filter: {device.name}, VIN={id_str}, filter={vehicle_vin}")
+                else:
+                    _LOGGER.debug(f"Tesla device skipped VIN check (not VIN format): {device.name}, id={id_str} (len={id_len}, all_digit={is_all_digit})")
+
+    # Fallback: if no VIN-based devices found, check for devices with EV entities
+    if not tesla_devices and all_tesla_domain_devices:
+        _LOGGER.debug(f"No VIN-based devices found, checking {len(all_tesla_domain_devices)} Tesla domain devices for EV entities")
+        for device, domain, id_str in all_tesla_domain_devices:
+            if _device_has_ev_entities(device.id):
+                tesla_devices.append(device)
+                _LOGGER.info(f"Found Tesla EV device by entity detection: {device.name}, domain={domain}, id={id_str}")
+                break
 
     if not tesla_devices:
-        _LOGGER.warning("No Tesla EV devices found in device registry (looking for tesla_fleet/teslemetry integrations)")
+        _LOGGER.warning(f"No Tesla EV devices found. Looking for domains {TESLA_EV_INTEGRATIONS}, found domains: {sorted(all_domains_found)}")
+        if all_tesla_domain_devices:
+            _LOGGER.warning(f"Found {len(all_tesla_domain_devices)} Tesla domain devices but none matched VIN format or had EV entities:")
+            for device, domain, id_str in all_tesla_domain_devices[:5]:
+                _LOGGER.warning(f"  - {device.name}: domain={domain}, id={id_str}")
         return None
 
     # Use first vehicle if no specific VIN provided
@@ -125,43 +178,161 @@ async def _get_tesla_ev_entity(
     return None
 
 
-async def _wake_tesla_ev(hass: HomeAssistant, vehicle_vin: Optional[str] = None) -> bool:
+async def _wake_tesla_ev(
+    hass: HomeAssistant,
+    vehicle_vin: Optional[str] = None,
+    wait_timeout: int = 45,
+    max_retries: int = 3,
+) -> bool:
     """
     Wake up a Tesla vehicle before sending commands.
+
+    Tesla vehicles can take 15-60 seconds to wake from deep sleep.
+    This function sends the wake command, waits, and verifies the car is awake.
 
     Args:
         hass: Home Assistant instance
         vehicle_vin: Optional VIN to filter by specific vehicle
+        wait_timeout: Maximum seconds to wait for car to wake (default 45)
+        max_retries: Number of wake command retries (default 3)
 
     Returns:
-        True if wake command sent successfully
+        True if vehicle is awake (or timeout reached), False if wake failed completely
     """
-    # Find the wake up button entity
-    wake_entity = await _get_tesla_ev_entity(
-        hass,
-        r"button\..*wake(_up)?$",
-        vehicle_vin
-    )
+    import asyncio
 
-    if not wake_entity:
-        _LOGGER.warning("Could not find Tesla wake button entity")
-        return False
+    # Generate a lock key (use VIN if available, otherwise generic)
+    lock_key = vehicle_vin or "default"
+
+    # Check if wake is already in progress for this vehicle
+    if _ev_wake_lock.get(lock_key, False):
+        _LOGGER.info(f"Wake already in progress for Tesla EV (key={lock_key}), waiting for it to complete")
+        # Wait up to wait_timeout for the other wake to complete
+        wait_start = asyncio.get_event_loop().time()
+        while _ev_wake_lock.get(lock_key, False):
+            if (asyncio.get_event_loop().time() - wait_start) > wait_timeout:
+                _LOGGER.warning(f"Timed out waiting for existing wake to complete")
+                return True  # Proceed anyway
+            await asyncio.sleep(2)
+        _LOGGER.info(f"Previous wake completed, proceeding")
+        return True
+
+    # Acquire lock
+    _ev_wake_lock[lock_key] = True
+    _LOGGER.debug(f"Acquired wake lock for Tesla EV (key={lock_key})")
 
     try:
-        await hass.services.async_call(
-            "button",
-            "press",
-            {"entity_id": wake_entity},
-            blocking=True,
+        # Find the wake up button entity
+        wake_entity = await _get_tesla_ev_entity(
+            hass,
+            r"button\..*wake(_up)?$",
+            vehicle_vin
         )
-        _LOGGER.info(f"Sent wake command to Tesla EV: {wake_entity}")
-        # Wait a moment for vehicle to wake
-        import asyncio
-        await asyncio.sleep(3)
+
+        if not wake_entity:
+            _LOGGER.warning("Could not find Tesla wake button entity")
+            return False
+
+        # Try multiple entity patterns to verify wake status
+        # Different Tesla integrations use different entity naming conventions
+        status_patterns = [
+            (r"binary_sensor\..*_asleep$", "binary", "off"),  # asleep=off means awake
+            (r"binary_sensor\..*asleep$", "binary", "off"),   # Without underscore
+            (r"sensor\..*_state$", "state", "online"),        # state=online
+            (r"sensor\..*_status$", "state", "online"),       # status=online
+            (r"sensor\..*state$", "state", "online"),         # Without underscore
+        ]
+
+        status_entity = None
+        status_type = None
+        awake_value = None
+
+        for pattern, stype, awake_val in status_patterns:
+            entity = await _get_tesla_ev_entity(hass, pattern, vehicle_vin)
+            if entity:
+                status_entity = entity
+                status_type = stype
+                awake_value = awake_val
+                _LOGGER.info(f"Found Tesla status entity: {entity} (type={stype}, awake_value={awake_val})")
+                break
+
+        if not status_entity:
+            _LOGGER.warning(
+                "Could not find Tesla status/asleep sensor. "
+                "Will send wake command but cannot verify wake completion. "
+                "Tried patterns: binary_sensor.*_asleep, binary_sensor.*asleep, "
+                "sensor.*_state, sensor.*_status, sensor.*state"
+            )
+
+        def _is_awake() -> bool:
+            """Check if the vehicle is currently awake."""
+            if not status_entity:
+                return False
+            state = hass.states.get(status_entity)
+            if not state:
+                return False
+            if status_type == "binary":
+                return state.state == awake_value
+            else:
+                return state.state.lower() == awake_value.lower()
+
+        # Check if already awake
+        if _is_awake():
+            _LOGGER.debug(f"Tesla EV is already awake ({status_entity})")
+            return True
+
+        # Send wake command with retries
+        for attempt in range(1, max_retries + 1):
+            try:
+                _LOGGER.info(f"Sending wake command to Tesla EV (attempt {attempt}/{max_retries}): {wake_entity}")
+                await hass.services.async_call(
+                    "button",
+                    "press",
+                    {"entity_id": wake_entity},
+                    blocking=True,
+                )
+            except Exception as e:
+                _LOGGER.warning(f"Wake command attempt {attempt} failed: {e}")
+                if attempt == max_retries:
+                    _LOGGER.error(f"Failed to wake Tesla EV after {max_retries} attempts")
+                    # Still return True to attempt the charging command anyway
+                    return True
+                await asyncio.sleep(5)
+                continue
+
+            # If we don't have a status sensor, just wait a fixed time
+            if not status_entity:
+                _LOGGER.info(f"No status sensor available, waiting {wait_timeout // max_retries}s before proceeding")
+                await asyncio.sleep(wait_timeout // max_retries)
+                if attempt == max_retries:
+                    return True
+                continue
+
+            # Wait for car to wake up (poll every 3 seconds)
+            start_time = asyncio.get_event_loop().time()
+            poll_interval = 3
+            wake_timeout_per_attempt = wait_timeout // max_retries
+
+            while (asyncio.get_event_loop().time() - start_time) < wake_timeout_per_attempt:
+                await asyncio.sleep(poll_interval)
+                elapsed = int(asyncio.get_event_loop().time() - start_time)
+
+                if _is_awake():
+                    _LOGGER.info(f"Tesla EV is now awake after {elapsed}s ({status_entity})")
+                    await asyncio.sleep(2)  # Extra buffer for readiness
+                    return True
+
+                _LOGGER.debug(f"Waiting for Tesla EV to wake... {elapsed}s elapsed")
+
+            _LOGGER.info(f"Wake attempt {attempt} timed out after {wake_timeout_per_attempt}s, will retry...")
+
+        _LOGGER.warning(f"Tesla EV wake timed out after {wait_timeout}s total, attempting command anyway")
         return True
-    except Exception as e:
-        _LOGGER.error(f"Failed to wake Tesla EV: {e}")
-        return False
+
+    finally:
+        # Always release the lock
+        _ev_wake_lock[lock_key] = False
+        _LOGGER.debug(f"Released wake lock for Tesla EV (key={lock_key})")
 
 
 def _get_ev_config(config_entry: ConfigEntry) -> dict:
@@ -487,11 +658,10 @@ async def _action_set_backup_reserve(
     config_entry: ConfigEntry,
     params: Dict[str, Any]
 ) -> bool:
-    """Set battery backup reserve percentage (Tesla only)."""
-    if _is_sigenergy(config_entry):
-        _LOGGER.warning("set_backup_reserve not supported for Sigenergy")
-        return False
+    """Set battery backup reserve percentage.
 
+    Supports both Tesla Powerwall and SigEnergy systems.
+    """
     from ..const import DOMAIN, SERVICE_SET_BACKUP_RESERVE
 
     # Accept both "percent" and "reserve_percent" for flexibility
@@ -1947,10 +2117,50 @@ async def _dynamic_ev_update_surplus(
 
                 # Try to get actual prices from config entry data
                 entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
-                price_data = entry_data.get("current_prices", {})
-                if price_data:
-                    import_price = price_data.get("import_cents", 30.0)
-                    export_price = price_data.get("export_cents", 8.0)
+
+                # Try Amber coordinator first
+                amber_coordinator = entry_data.get("amber_coordinator")
+                if amber_coordinator and amber_coordinator.data:
+                    current_prices = amber_coordinator.data.get("current", [])
+                    for price in current_prices:
+                        if price.get("channelType") == "general":
+                            import_price = price.get("perKwh", 30.0)
+                        elif price.get("channelType") == "feedIn":
+                            export_price = abs(price.get("perKwh", 8.0))
+
+                # Fallback to tariff_schedule (for Globird/AEMO VPP users)
+                elif entry_data.get("tariff_schedule"):
+                    tariff_schedule = entry_data.get("tariff_schedule", {})
+                    import_price = tariff_schedule.get("buy_price", 30.0)
+                    export_price = tariff_schedule.get("sell_price", 8.0)
+
+                # Fallback to Sigenergy tariff (for Sigenergy users with Amber)
+                elif entry_data.get("sigenergy_tariff"):
+                    from datetime import datetime
+                    sigenergy_tariff = entry_data.get("sigenergy_tariff", {})
+                    buy_prices = sigenergy_tariff.get("buy_prices", [])
+                    sell_prices = sigenergy_tariff.get("sell_prices", [])
+                    if buy_prices:
+                        now = datetime.now()
+                        current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
+                        for slot in buy_prices:
+                            if slot.get("timeRange", "").startswith(current_time):
+                                import_price = slot.get("price", 30.0)
+                                break
+                    if sell_prices:
+                        now = datetime.now()
+                        current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
+                        for slot in sell_prices:
+                            if slot.get("timeRange", "").startswith(current_time):
+                                export_price = slot.get("price", 8.0)
+                                break
+
+                # Fallback to stored current_prices
+                else:
+                    price_data = entry_data.get("current_prices", {})
+                    if price_data:
+                        import_price = price_data.get("import_cents", 30.0)
+                        export_price = price_data.get("export_cents", 8.0)
 
                 await session_manager.update_session(
                     vehicle_id=vehicle_id,
@@ -2259,7 +2469,8 @@ async def _action_start_ev_charging_dynamic(
             hass, config_entry, {"amps": start_amps}
         )
         if not amps_success:
-            _LOGGER.warning(f"Dynamic EV: Failed to set initial amps to {start_amps}A")
+            # This is expected - Tesla reports lower max amps until charging actually starts
+            _LOGGER.debug(f"Dynamic EV: Could not set initial amps to {start_amps}A (will adjust once charging starts)")
 
     # Create the periodic update callback for this vehicle
     async def periodic_update(now) -> None:

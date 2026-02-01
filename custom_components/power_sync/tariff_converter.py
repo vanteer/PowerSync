@@ -209,6 +209,7 @@ def compare_forecast_types(
         })
 
     if not differences:
+        _LOGGER.debug("Forecast discrepancy check: No comparable intervals found (missing predicted/conservative data)")
         return {
             "has_discrepancy": False,
             "avg_difference": 0.0,
@@ -237,9 +238,13 @@ def compare_forecast_types(
                 d["time"], d["predicted"], d["conservative"], d["diff"]
             )
     else:
+        # Log the max prices seen even when no discrepancy
+        max_predicted = max((d["predicted"] for d in details), default=0)
+        max_conservative = max((d["conservative"] for d in details), default=0)
         _LOGGER.debug(
-            "Forecast types aligned: avg_diff=%.1fc/kWh, max=%.1fc/kWh",
-            avg_diff, max_diff
+            "Forecast types aligned: avg_diff=%.1fc/kWh, max_diff=%.1fc/kWh "
+            "(max_predicted=%.1fc, max_conservative=%.1fc, %d samples)",
+            avg_diff, max_diff, max_predicted, max_conservative, len(differences)
         )
 
     return {
@@ -248,6 +253,122 @@ def compare_forecast_types(
         "max_difference": round(max_diff, 2),
         "samples": len(differences),
         "details": top_details,
+    }
+
+
+def detect_price_spikes(
+    forecast_data: list[dict[str, Any]],
+    import_threshold: float = 100.0,
+    export_threshold: float = 50.0,
+    forecast_type: str = "predicted",
+) -> dict[str, Any]:
+    """
+    Detect extreme price spikes in forecast data for both import and export.
+
+    Analyzes forecast intervals to detect when prices exceed thresholds,
+    which may indicate unrealistic forecasts or actual grid events.
+
+    Args:
+        forecast_data: List of Amber/Octopus price points (30-min resolution)
+        import_threshold: Import price threshold in c/kWh (default $1/kWh)
+        export_threshold: Export price threshold in c/kWh (default $0.50/kWh)
+        forecast_type: Which forecast to check ("predicted", "high", or "low")
+
+    Returns:
+        Dict with:
+            - has_spike: bool - True if any interval exceeds threshold
+            - import_spikes: dict - Import spike details
+            - export_spikes: dict - Export spike details
+    """
+    import_spikes = []
+    export_spikes = []
+    max_import = 0.0
+    max_export = 0.0
+
+    for point in forecast_data:
+        interval_type = point.get("type", "")
+        channel_type = point.get("channelType", "")
+        advanced_price = point.get("advancedPrice")
+
+        # Only check ForecastInterval
+        if interval_type != "ForecastInterval":
+            continue
+
+        # Get the price based on forecast type
+        price = None
+        if advanced_price and isinstance(advanced_price, dict):
+            price = advanced_price.get(forecast_type)
+        if price is None:
+            price = point.get("perKwh")
+
+        if price is None:
+            continue
+
+        nem_time = point.get("nemTime", "")
+
+        # Check import (general) channel
+        if channel_type == "general":
+            max_import = max(max_import, price)
+            if price > import_threshold:
+                import_spikes.append({
+                    "time": nem_time,
+                    "price": round(price, 2),
+                    "type": "import"
+                })
+
+        # Check export (feedIn) channel
+        elif channel_type == "feedIn":
+            # Export prices are typically negative (you get paid)
+            # But high positive export prices are unusual
+            actual_export = abs(price)  # Handle both positive and negative
+            max_export = max(max_export, actual_export)
+            if actual_export > export_threshold:
+                export_spikes.append({
+                    "time": nem_time,
+                    "price": round(price, 2),
+                    "type": "export"
+                })
+
+    has_import_spike = len(import_spikes) > 0
+    has_export_spike = len(export_spikes) > 0
+    has_spike = has_import_spike or has_export_spike
+
+    if has_import_spike:
+        _LOGGER.warning(
+            "⚠️ Import price spike: %d intervals exceed %.0fc/kWh (max=%.0fc = $%.2f/kWh)",
+            len(import_spikes), import_threshold, max_import, max_import / 100
+        )
+        for s in import_spikes[:5]:
+            _LOGGER.warning("   %s: %.1fc/kWh", s["time"], s["price"])
+
+    if has_export_spike:
+        _LOGGER.warning(
+            "⚠️ Export price spike: %d intervals exceed %.0fc/kWh (max=%.0fc = $%.2f/kWh)",
+            len(export_spikes), export_threshold, max_export, max_export / 100
+        )
+        for s in export_spikes[:5]:
+            _LOGGER.warning("   %s: %.1fc/kWh", s["time"], s["price"])
+
+    if not has_spike:
+        _LOGGER.debug(
+            "No price spikes: max_import=%.1fc, max_export=%.1fc (thresholds: import=%.0fc, export=%.0fc)",
+            max_import, max_export, import_threshold, export_threshold
+        )
+
+    return {
+        "has_spike": has_spike,
+        "import_spikes": {
+            "has_spike": has_import_spike,
+            "max_price": round(max_import, 2),
+            "count": len(import_spikes),
+            "details": import_spikes[:10],
+        },
+        "export_spikes": {
+            "has_spike": has_export_spike,
+            "max_price": round(max_export, 2),
+            "count": len(export_spikes),
+            "details": export_spikes[:10],
+        },
     }
 
 
@@ -977,6 +1098,7 @@ def _build_tariff_structure(
         "amber": "Amber Electric",
         "flow_power": "Flow Power",
         "globird": "Globird",  # Added for safety, though TOU sync should be skipped for Globird
+        "octopus": "Octopus Energy",
     }
     provider_name = provider_names.get(electricity_provider, electricity_provider.title())
     # Build TOU periods
@@ -1896,3 +2018,60 @@ def apply_chip_mode(
         _LOGGER.info("Chip Mode: no periods in configured window")
 
     return tariff
+
+
+def convert_octopus_to_tesla_tariff(
+    octopus_data: Dict[str, Any],
+    tesla_energy_site_id: str = "",
+) -> Dict[str, Any] | None:
+    """
+    Convert Octopus Energy UK price data to Tesla tariff format.
+
+    Octopus price data is already converted to Amber-compatible format by
+    OctopusPriceCoordinator, so we can delegate to convert_amber_to_tesla_tariff.
+
+    Args:
+        octopus_data: Data from OctopusPriceCoordinator with 'forecast' key containing
+                      Amber-compatible price entries
+        tesla_energy_site_id: Tesla energy site ID (optional)
+
+    Returns:
+        Tesla-compatible tariff structure, or None if conversion fails
+
+    Key differences from Amber handled by OctopusPriceCoordinator:
+    - Prices in pence/kWh (treated as cents for Tesla)
+    - Currency: GBP (not AUD) - Tesla is currency-agnostic
+    - Timezone: Europe/London (not Australia/*)
+    - 30-minute intervals (same as Amber)
+    """
+    if not octopus_data:
+        _LOGGER.error("No Octopus data provided for tariff conversion")
+        return None
+
+    forecast_data = octopus_data.get("forecast", [])
+    if not forecast_data:
+        _LOGGER.error("No forecast data in Octopus response")
+        return None
+
+    # Use the existing Amber conversion with Octopus branding
+    # OctopusPriceCoordinator already converts to Amber-compatible format
+    result = convert_amber_to_tesla_tariff(
+        forecast_data,
+        tesla_energy_site_id=tesla_energy_site_id,
+        electricity_provider="octopus",
+    )
+
+    if result:
+        # Log conversion summary
+        product_code = octopus_data.get("product_code", "unknown")
+        tariff_code = octopus_data.get("tariff_code", "unknown")
+        gsp_region = octopus_data.get("gsp_region", "unknown")
+
+        _LOGGER.info(
+            "Converted Octopus tariff to Tesla format: product=%s, tariff=%s, region=%s",
+            product_code,
+            tariff_code,
+            gsp_region,
+        )
+
+    return result

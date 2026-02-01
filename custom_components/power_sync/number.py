@@ -46,88 +46,77 @@ async def async_setup_entry(
             CONF_ABC_EMERGENCY_MIN_SOC_PERCENT,
             "ABC Emergency Min SOC",
             DEFAULT_ABC_EMERGENCY_MIN_SOC_PERCENT,
-            0, 100, 1, PERCENTAGE, "mdi:battery-alert",
-            "power_sync_abc_emergency_min_soc"
+            0, 100, 1, PERCENTAGE, "mdi:battery-alert"
         ),
         PowerSyncABCNumber(
             entry,
             CONF_ABC_HIGH_PRICE_MIN_SOC_PERCENT,
             "ABC High Price Min SOC",
             DEFAULT_ABC_HIGH_PRICE_MIN_SOC_PERCENT,
-            0, 100, 1, PERCENTAGE, "mdi:battery-arrow-up",
-            "power_sync_abc_high_price_min_soc"
+            0, 100, 1, PERCENTAGE, "mdi:battery-arrow-up"
         ),
         PowerSyncABCNumber(
             entry,
             CONF_ABC_OVERNIGHT_LOAD_W,
             "ABC Overnight Load",
             DEFAULT_ABC_OVERNIGHT_LOAD_W,
-            0, 5000, 10, UnitOfPower.WATT, "mdi:home-lightning-bolt",
-            "power_sync_abc_overnight_load"
+            0, 5000, 10, UnitOfPower.WATT, "mdi:home-lightning-bolt"
         ),
         PowerSyncABCNumber(
             entry,
             CONF_ABC_EVENING_LOAD_W,
             "ABC Evening Load",
             DEFAULT_ABC_EVENING_LOAD_W,
-            0, 5000, 10, UnitOfPower.WATT, "mdi:home-lightning-bolt",
-            "power_sync_abc_evening_load"
+            0, 5000, 10, UnitOfPower.WATT, "mdi:home-lightning-bolt"
         ),
         PowerSyncABCNumber(
             entry,
             CONF_ABC_TRANSIENT_DURATION_MIN,
             "ABC Transient Duration",
             DEFAULT_ABC_TRANSIENT_DURATION_MIN,
-            0, 480, 5, "min", "mdi:timer-outline",
-            "power_sync_abc_transient_duration"
+            0, 480, 5, "min", "mdi:timer-outline"
         ),
         PowerSyncABCNumber(
             entry,
             CONF_ABC_DAY_SPIKE_EXPORT_THRESHOLD_CENTS,
             "ABC Day Spike Export Threshold",
             DEFAULT_ABC_DAY_SPIKE_EXPORT_THRESHOLD_CENTS,
-            0, 1000, 0.5, "c/kWh", "mdi:trending-up",
-            "power_sync_abc_day_spike_export_threshold"
+            0, 1000, 0.5, "c/kWh", "mdi:trending-up"
         ),
         PowerSyncABCNumber(
             entry,
             CONF_ABC_EXPORT_MIN_THRESHOLD_CENTS,
             "ABC Export Minimum Earnings",
             DEFAULT_ABC_EXPORT_MIN_THRESHOLD_CENTS,
-            -100, 100, 0.5, "c/kWh", "mdi:cash-minus",
-            "power_sync_abc_export_min_threshold"
+            -100, 100, 0.5, "c/kWh", "mdi:cash-minus"
         ),
         PowerSyncABCNumber(
             entry,
             CONF_ABC_VERY_HIGH_EXPORT_THRESHOLD_CENTS,
             "ABC Very High Export Threshold",
             DEFAULT_ABC_VERY_HIGH_EXPORT_THRESHOLD_CENTS,
-            0, 10000, 1, "c/kWh", "mdi:trending-up",
-            "power_sync_abc_very_high_export_threshold"
+            0, 10000, 1, "c/kWh", "mdi:trending-up"
         ),
         PowerSyncABCNumber(
             entry,
             CONF_ABC_IMPORT_STABILISED_THRESHOLD_CENTS,
             "ABC Import Stabilised Threshold",
             DEFAULT_ABC_IMPORT_STABILISED_THRESHOLD_CENTS,
-            0, 1000, 0.5, "c/kWh", "mdi:trending-down",
-            "power_sync_abc_import_stabilised_threshold"
+            0, 1000, 0.5, "c/kWh", "mdi:trending-down"
         ),
         PowerSyncABCNumber(
             entry,
             CONF_ABC_BUFFER_MIN_MINUTES,
             "ABC Buffer Minimum Minutes",
             DEFAULT_ABC_BUFFER_MIN_MINUTES,
-            0, 120, 1, "min", "mdi:timer-outline",
-            "power_sync_abc_buffer_minimum_minutes"
+            0, 120, 1, "min", "mdi:timer-outline"
         ),
         PowerSyncABCNumber(
             entry,
             CONF_ABC_MODE_CHANGE_MIN_SECONDS,
             "ABC Mode Change Min Seconds",
             DEFAULT_ABC_MODE_CHANGE_MIN_SECONDS,
-            0, 600, 5, "s", "mdi:timer-sand",
-            "power_sync_abc_mode_change_min_seconds"
+            0, 600, 5, "s", "mdi:timer-sand"
         ),
     ]
     async_add_entities(entities)
@@ -149,7 +138,6 @@ class PowerSyncABCNumber(NumberEntity):
         step: float,
         unit: str | None = None,
         icon: str | None = None,
-        suggested_object_id: str | None = None,
     ) -> None:
         self._entry = entry
         self._key = key
@@ -161,7 +149,6 @@ class PowerSyncABCNumber(NumberEntity):
         self._attr_native_unit_of_measurement = unit
         self._attr_icon = icon
         self._attr_unique_id = f"{entry.entry_id}_{key}"
-        self._attr_suggested_object_id = suggested_object_id
 
     @property
     def native_value(self) -> float:

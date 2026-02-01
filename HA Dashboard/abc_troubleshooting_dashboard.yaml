@@ -8,7 +8,7 @@ views:
       - type: vertical-stack
         cards:
           - type: custom:button-card
-            entity: switch.power_sync_advanced_battery_control
+            entity: switch.advanced_battery_control
             name: Advanced Battery Control
             show_state: true
             styles:
@@ -31,7 +31,7 @@ views:
               modes and enforces safety guardrails to maximize export profit and
               protect overnight energy needs.
           - type: custom:button-card
-            entity: switch.power_sync_advanced_battery_control
+            entity: switch.advanced_battery_control
             name: Controller State
             show_name: true
             show_label: true
@@ -66,29 +66,29 @@ views:
               SOC, and your configured targets.
           - type: markdown
             content: |
-              **Reason:** {{ state_attr('switch.power_sync_advanced_battery_control', 'reason') or 'N/A' }}
+              **Reason:** {{ state_attr('switch.advanced_battery_control', 'reason') or 'N/A' }}
 
-              **SOC:** {{ state_attr('switch.power_sync_advanced_battery_control', 'soc') | float(0) | round(1) }}%
-              **Overnight Target:** {{ state_attr('switch.power_sync_advanced_battery_control', 'overnight_target_soc') | float(0) | round(1) }}%
+              **SOC:** {{ state_attr('switch.advanced_battery_control', 'soc') | float(0) | round(1) }}%
+              **Overnight Target:** {{ state_attr('switch.advanced_battery_control', 'overnight_target_soc') | float(0) | round(1) }}%
 
-              **Current Export:** {{ (state_attr('switch.power_sync_advanced_battery_control', 'export_price') | float(0) * 1) | round(1) }}¢
-              **Current Import:** {{ (state_attr('switch.power_sync_advanced_battery_control', 'import_price') | float(0) * 1) | round(1) }}¢
+              **Current Export:** {{ (state_attr('switch.advanced_battery_control', 'export_price') | float(0) * 1) | round(1) }}¢
+              **Current Import:** {{ (state_attr('switch.advanced_battery_control', 'import_price') | float(0) * 1) | round(1) }}¢
 
               **Flags:**
-              - Very High Price Mode: {{ state_attr('switch.power_sync_advanced_battery_control', 'very_high_price_mode') }}
-              - Evening Peak Window: {{ state_attr('switch.power_sync_advanced_battery_control', 'evening_peak_window') }}
-              - Daytime Spike Allowed: {{ state_attr('switch.power_sync_advanced_battery_control', 'daytime_spike_allowed') }}
+              - Very High Price Mode: {{ state_attr('switch.advanced_battery_control', 'very_high_price_mode') }}
+              - Evening Peak Window: {{ state_attr('switch.advanced_battery_control', 'evening_peak_window') }}
+              - Daytime Spike Allowed: {{ state_attr('switch.advanced_battery_control', 'daytime_spike_allowed') }}
 
               **Hardware Status:**
-              - Operation Mode: {{ state_attr('switch.power_sync_advanced_battery_control', 'actual_mode') }}
-              - Backup Reserve: {{ state_attr('switch.power_sync_advanced_battery_control', 'actual_backup') }}%
-              - Grid Charging: {{ 'Disabled' if state_attr('switch.power_sync_advanced_battery_control', 'actual_grid_charging') == True else 'Enabled' if state_attr('switch.power_sync_advanced_battery_control', 'actual_grid_charging') == False else 'Unknown' }}
-              - Export Rule: {{ state_attr('switch.power_sync_advanced_battery_control', 'actual_export_rule') }} (Target: {{ state_attr('switch.power_sync_advanced_battery_control', 'expected_export_rule') }})
+              - Operation Mode: {{ state_attr('switch.advanced_battery_control', 'actual_mode') }}
+              - Backup Reserve: {{ state_attr('switch.advanced_battery_control', 'actual_backup') }}%
+              - Grid Charging: {{ 'Disabled' if state_attr('switch.advanced_battery_control', 'actual_grid_charging') == True else 'Enabled' if state_attr('switch.advanced_battery_control', 'actual_grid_charging') == False else 'Unknown' }}
+              - Export Rule: {{ state_attr('switch.advanced_battery_control', 'actual_export_rule') }} (Target: {{ state_attr('switch.advanced_battery_control', 'expected_export_rule') }})
 
       - type: horizontal-stack
         cards:
           - type: gauge
-            entity: sensor.power_sync_current_export_price_cents
+            entity: sensor.current_export_price_c
             name: Export
             unit: ¢/kWh
             min: -100
@@ -104,7 +104,7 @@ views:
                   height: 140px;
                 }
           - type: gauge
-            entity: sensor.power_sync_battery_level
+            entity: sensor.battery_level
             name: SOC
             min: 0
             max: 100
@@ -125,19 +125,19 @@ views:
           title: ABC Variables
         graph_span: 4h
         series:
-          - entity: sensor.power_sync_battery_level
+          - entity: sensor.battery_level
             name: SOC
             yaxis_id: soc
             stroke_width: 1
             color: '#2196F3'
-          - entity: switch.power_sync_advanced_battery_control
+          - entity: switch.advanced_battery_control
             attribute: overnight_target_soc
             name: Target SOC
             yaxis_id: soc
             stroke_width: 1
             curve: stepline
             color: '#FF9800'
-          - entity: sensor.power_sync_current_export_price_cents
+          - entity: sensor.current_export_price_c
             name: Export Price
             yaxis_id: price
             color: '#4CAF50'
@@ -179,15 +179,15 @@ views:
               cooking spikes beyond the baseline evening load.
           - type: entities
             entities:
-              - entity: number.power_sync_abc_emergency_min_soc
+              - entity: number.abc_emergency_min_soc
                 name: Emergency Min SOC (%)
-              - entity: number.power_sync_abc_high_price_min_soc
+              - entity: number.abc_high_price_min_soc
                 name: High Price Min SOC (%)
-              - entity: number.power_sync_abc_overnight_load
+              - entity: number.abc_overnight_load
                 name: Overnight Load (Sleep)
-              - entity: number.power_sync_abc_evening_load
+              - entity: number.abc_evening_load
                 name: Evening Load (Active)
-              - entity: number.power_sync_abc_transient_duration
+              - entity: number.abc_transient_duration
                 name: Transient Duration (min)
           - type: markdown
             content: >
@@ -206,13 +206,13 @@ views:
               mode after a spike.
           - type: entities
             entities:
-              - entity: number.power_sync_abc_day_spike_export_threshold
+              - entity: number.abc_day_spike_export_threshold
                 name: Daytime Spike Export
-              - entity: number.power_sync_abc_export_min_threshold
+              - entity: number.abc_export_min_threshold
                 name: Export Minimum Earnings
-              - entity: number.power_sync_abc_very_high_export_threshold
+              - entity: number.abc_very_high_export_threshold
                 name: Very High Export
-              - entity: number.power_sync_abc_import_stabilised_threshold
+              - entity: number.abc_import_stabilised_threshold
                 name: Import Stabilised
           - type: markdown
             content: >
@@ -232,17 +232,17 @@ views:
               **Min Mode Change:** Debounce timer for Tesla API changes.
           - type: entities
             entities:
-              - entity: time.power_sync_abc_night_start
+              - entity: time.abc_night_start
                 name: Night Start
-              - entity: time.power_sync_abc_night_end
+              - entity: time.abc_night_end
                 name: Night End
-              - entity: time.power_sync_abc_evening_peak_start
+              - entity: time.abc_evening_peak_start
                 name: Evening Peak Start
-              - entity: time.power_sync_abc_evening_peak_end
+              - entity: time.abc_evening_peak_end
                 name: Evening Peak End
-              - entity: number.power_sync_abc_buffer_minimum_minutes
+              - entity: number.abc_buffer_minimum_minutes
                 name: Min Buffer Time (min)
-              - entity: number.power_sync_abc_mode_change_min_seconds
+              - entity: number.abc_mode_change_min_seconds
                 name: Min Mode Change Interval (s)
           - type: markdown
             content: >
@@ -252,5 +252,5 @@ views:
               the solar forecast is too low to meet tonight's target.
           - type: entities
             entities:
-              - entity: switch.power_sync_abc_solcast_guardrail
+              - entity: switch.abc_use_solcast_guardrail
                 name: Use Solcast Guardrail

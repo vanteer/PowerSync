@@ -56,7 +56,6 @@ async def async_setup_entry(
                 name="TOU control",
                 icon="mdi:sync",
             ),
-            suggested_object_id="power_sync_auto_sync"
         ),
     ]
 
@@ -72,7 +71,6 @@ async def async_setup_entry(
                     name="Force Discharge",
                     icon="mdi:battery-arrow-up",
                 ),
-                suggested_object_id="power_sync_force_discharge"
             ),
             ForceChargeSwitch(
                 hass=hass,
@@ -82,7 +80,6 @@ async def async_setup_entry(
                     name="Force Charge",
                     icon="mdi:battery-arrow-down",
                 ),
-                suggested_object_id="power_sync_force_charge"
             ),
             AdvancedBatteryControlSwitch(
                 hass=hass,
@@ -92,11 +89,9 @@ async def async_setup_entry(
                     name="Advanced battery control",
                     icon="mdi:battery-auto",
                 ),
-                suggested_object_id="power_sync_advanced_battery_control"
             ),
             AdvancedBatteryControlGuardrailSwitch(
                 entry=entry,
-                suggested_object_id="power_sync_abc_solcast_guardrail"
             ),
         ])
 
@@ -114,14 +109,12 @@ class AutoSyncSwitch(SwitchEntity):
             hass: HomeAssistant,
             entry: ConfigEntry,
             description: SwitchEntityDescription,
-            suggested_object_id: str | None = None,
     ) -> None:
         """Initialize the switch."""
         self.hass = hass
         self.entity_description = description
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_suggested_object_id = suggested_object_id
 
         # Initialize state from config
         self._attr_is_on = entry.options.get(
@@ -175,14 +168,12 @@ class ForceDischargeSwitch(SwitchEntity):
         hass: HomeAssistant,
         entry: ConfigEntry,
         description: SwitchEntityDescription,
-        suggested_object_id: str | None = None,
     ) -> None:
         """Initialize the switch."""
         self.hass = hass
         self.entity_description = description
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_suggested_object_id = suggested_object_id
         self._attr_is_on = False
         self._discharge_expires_at: datetime | None = None
         self._duration_minutes: int = DEFAULT_DISCHARGE_DURATION
@@ -311,14 +302,12 @@ class ForceChargeSwitch(SwitchEntity):
         hass: HomeAssistant,
         entry: ConfigEntry,
         description: SwitchEntityDescription,
-        suggested_object_id: str | None = None,
     ) -> None:
         """Initialize the switch."""
         self.hass = hass
         self.entity_description = description
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_suggested_object_id = suggested_object_id
         self._attr_is_on = False
         self._charge_expires_at: datetime | None = None
         self._duration_minutes: int = DEFAULT_DISCHARGE_DURATION  # Reuse same default
@@ -441,13 +430,11 @@ class AdvancedBatteryControlSwitch(SwitchEntity):
         hass: HomeAssistant,
         entry: ConfigEntry,
         description: SwitchEntityDescription,
-        suggested_object_id: str | None = None,
     ) -> None:
         self.hass = hass
         self.entity_description = description
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_suggested_object_id = suggested_object_id
         
         # Initialize state from config options
         from .const import CONF_ABC_ENABLED_DEFAULT, DEFAULT_ABC_ENABLED_DEFAULT
@@ -563,11 +550,10 @@ class AdvancedBatteryControlGuardrailSwitch(SwitchEntity):
     _attr_entity_category = EntityCategory.CONFIG
     _attr_icon = "mdi:solar-power"
 
-    def __init__(self, entry: ConfigEntry, suggested_object_id: str | None = None) -> None:
+    def __init__(self, entry: ConfigEntry) -> None:
         self._entry = entry
         self._attr_name = "ABC Use Solcast Guardrail"
         self._attr_unique_id = f"{entry.entry_id}_abc_solcast_guardrail"
-        self._attr_suggested_object_id = suggested_object_id
 
     @property
     def is_on(self) -> bool:

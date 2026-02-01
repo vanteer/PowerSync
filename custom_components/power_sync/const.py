@@ -91,6 +91,16 @@ CONF_TESLA_API_PROVIDER = "tesla_api_provider"
 TESLA_PROVIDER_TESLEMETRY = "teslemetry"
 TESLA_PROVIDER_FLEET_API = "fleet_api"
 
+# All supported Tesla/EV integrations (for device/entity discovery)
+# These are the HA integration domain names used in device identifiers
+TESLA_INTEGRATIONS = [
+    "tesla_fleet",    # Official Tesla Fleet API integration
+    "teslemetry",     # Teslemetry integration
+    "tessie",         # Tessie integration
+    "tesla_custom",   # Tesla Custom Integration
+    "tesla",          # Older Tesla integration
+]
+
 # Fleet API configuration (direct Tesla API)
 CONF_FLEET_API_ACCESS_TOKEN = "fleet_api_access_token"
 CONF_FLEET_API_REFRESH_TOKEN = "fleet_api_refresh_token"
@@ -174,6 +184,59 @@ ELECTRICITY_PROVIDERS = {
     "flow_power": "Flow Power",
     "globird": "Globird",
     "aemo_vpp": "AEMO VPP (AGL, Engie, etc.)",
+    "octopus": "Octopus Energy (UK)",
+}
+
+# Octopus Energy UK configuration
+CONF_OCTOPUS_PRODUCT = "octopus_product"
+CONF_OCTOPUS_REGION = "octopus_region"
+CONF_OCTOPUS_PRODUCT_CODE = "octopus_product_code"
+CONF_OCTOPUS_TARIFF_CODE = "octopus_tariff_code"
+CONF_OCTOPUS_EXPORT_PRODUCT_CODE = "octopus_export_product_code"
+CONF_OCTOPUS_EXPORT_TARIFF_CODE = "octopus_export_tariff_code"
+
+# Octopus API base URL
+OCTOPUS_API_BASE_URL = "https://api.octopus.energy/v1"
+
+# Octopus products
+OCTOPUS_PRODUCTS = {
+    "agile": "Agile Octopus (dynamic half-hourly)",
+    "go": "Octopus Go (EV tariff)",
+    "flux": "Octopus Flux (solar/battery)",
+    "tracker": "Octopus Tracker (daily price)",
+}
+
+# Octopus product codes (latest versions)
+OCTOPUS_PRODUCT_CODES = {
+    "agile": "AGILE-24-10-01",
+    "go": "GO-VAR-22-10-14",
+    "flux": "FLUX-IMPORT-23-02-14",
+    "tracker": "SILVER-FLEX-BB-23-02-08",
+}
+
+# Octopus export product codes
+OCTOPUS_EXPORT_PRODUCT_CODES = {
+    "agile": "AGILE-OUTGOING-19-05-13",  # Agile Outgoing for dynamic export
+    "flux": "FLUX-EXPORT-23-02-14",  # Flux export tariff
+}
+
+# UK Grid Supply Points (GSP) - Octopus regional pricing
+# Each region has different wholesale prices due to transmission constraints
+OCTOPUS_GSP_REGIONS = {
+    "A": "Eastern England",
+    "B": "East Midlands",
+    "C": "London",
+    "D": "Merseyside and North Wales",
+    "E": "Midlands",
+    "F": "North Eastern",
+    "G": "North Western",
+    "H": "Southern",
+    "J": "South Eastern",
+    "K": "South Wales",
+    "L": "South Western",
+    "M": "Yorkshire",
+    "N": "South Scotland",
+    "P": "North Scotland",
 }
 
 # Flow Power state options with export rates
@@ -484,6 +547,10 @@ SERVICE_RESTORE_INVERTER = "restore_inverter"
 DISCHARGE_DURATIONS = [15, 30, 45, 60, 75, 90, 105, 120]
 DEFAULT_DISCHARGE_DURATION = 30
 
+# Duration dropdown entity option keys (stored in ConfigEntry.options)
+CONF_FORCE_CHARGE_DURATION = "force_charge_duration"
+CONF_FORCE_DISCHARGE_DURATION = "force_discharge_duration"
+
 # Advanced battery control (ABC) configuration keys (stored in ConfigEntry.options)
 CONF_ABC_ENABLED_DEFAULT = "abc_enabled_default"
 DEFAULT_ABC_ENABLED_DEFAULT = False
@@ -604,6 +671,16 @@ CONF_SETTLED_PRICES_ONLY = "settled_prices_only"
 CONF_FORECAST_DISCREPANCY_ALERT = "forecast_discrepancy_alert"
 CONF_FORECAST_DISCREPANCY_THRESHOLD = "forecast_discrepancy_threshold"
 DEFAULT_FORECAST_DISCREPANCY_THRESHOLD = 10.0  # c/kWh - alert if avg difference > 10c
+
+# Price Spike Alert configuration
+# Alerts when any forecast interval exceeds a price threshold (catches extreme prices)
+# This is separate from discrepancy - it catches unrealistic predicted prices
+# Supports separate thresholds for import (buy) and export (sell) prices
+CONF_PRICE_SPIKE_ALERT = "price_spike_alert"
+CONF_PRICE_SPIKE_IMPORT_THRESHOLD = "price_spike_import_threshold"
+CONF_PRICE_SPIKE_EXPORT_THRESHOLD = "price_spike_export_threshold"
+DEFAULT_PRICE_SPIKE_IMPORT_THRESHOLD = 100.0  # c/kWh - alert if import > $1/kWh
+DEFAULT_PRICE_SPIKE_EXPORT_THRESHOLD = 50.0  # c/kWh - alert if export > $0.50/kWh (negative = you get paid)
 
 # Alpha: Force tariff mode toggle
 # After uploading a tariff, briefly switch to self_consumption then back to autonomous
