@@ -1242,47 +1242,85 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
 
             # Try to get detailed hourly forecast from sensor attributes
             # The Solcast HA integration stores this in various attribute names
-            detailed_forecast = None
-            if today_state.attributes:
-                # Try common attribute names used by Solcast HA integration
-                detailed_forecast = (
-                    today_state.attributes.get("detailedForecast") or
-                    today_state.attributes.get("forecast_today") or
-                    today_state.attributes.get("detailedHourly") or
-                    today_state.attributes.get("forecasts")
+            detailed_forecast = []
+            
+            # Helper to extract from state attributes
+            def extract_from_attributes(state_obj):
+                if not state_obj or not state_obj.attributes:
+                    return []
+                return (
+                    state_obj.attributes.get("detailedForecast") or
+                    state_obj.attributes.get("forecast_today") or
+                    state_obj.attributes.get("detailedHourly") or
+                    state_obj.attributes.get("forecasts") or
+                    []
                 )
+
+            # Get from both today and tomorrow sensors to ensure we have enough data for ABC sunrise search
+            detailed_forecast.extend(extract_from_attributes(today_state))
+            detailed_forecast.extend(extract_from_attributes(tomorrow_state))
 
             # Build hourly forecast data for chart overlay
             hourly_forecast = []
-            if detailed_forecast and isinstance(detailed_forecast, list):
+            all_forecasts = []
+            if detailed_forecast:
                 now = dt_util.now()
                 today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
                 today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
 
+                # Use a set to track unique timestamps to avoid duplicates when combining sensors
+                seen_timestamps = set()
+
                 for period in detailed_forecast:
                     try:
                         # Parse period end time and pv_estimate
-                        period_end_str = period.get("period_end", "")
-                        pv_estimate = period.get("pv_estimate", 0) or 0
+                        # Solcast integration might use 'period_end' or 'period_start' or just 'time'
+                        # but based on _fetch_forecast_for_resource it's likely period_end
+                        p_end_str = period.get("period_end") or period.get("time") or period.get("period_start")
+                        pv_estimate = period.get("pv_estimate")
+                        if pv_estimate is None:
+                            pv_estimate = period.get("pv_estimate_kw") or period.get("power", 0)
 
-                        if period_end_str:
-                            period_end = datetime.fromisoformat(period_end_str.replace("Z", "+00:00"))
-                            period_local = dt_util.as_local(period_end)
+                        if p_end_str:
+                            # Handle various string formats
+                            p_end_str = str(p_end_str).replace("Z", "+00:00")
+                            try:
+                                p_end = datetime.fromisoformat(p_end_str)
+                            except ValueError:
+                                # Fallback for other formats if needed
+                                continue
+                                
+                            p_end_local = dt_util.as_local(p_end)
+                            ts = p_end_local.isoformat()
+                            
+                            if ts in seen_timestamps:
+                                continue
+                            seen_timestamps.add(ts)
+
+                            # Standardise the period for internal use
+                            standard_period = {
+                                "period_end": ts,
+                                "pv_estimate": float(pv_estimate)
+                            }
+                            all_forecasts.append(standard_period)
 
                             # Only include today's data for the chart
-                            if today_start <= period_local <= today_end:
+                            if today_start <= p_end_local <= today_end:
                                 hourly_forecast.append({
-                                    "time": period_local.strftime("%H:%M"),
-                                    "hour": period_local.hour,
-                                    "pv_estimate_kw": round(pv_estimate, 2),
+                                    "time": p_end_local.strftime("%H:%M"),
+                                    "hour": p_end_local.hour,
+                                    "pv_estimate_kw": round(float(pv_estimate), 2),
                                 })
                     except (ValueError, TypeError, KeyError):
                         continue
 
+            # Sort all forecasts by time to ensure loop works correctly
+            all_forecasts.sort(key=lambda x: x["period_end"])
+
             _LOGGER.info(
                 f"Solcast (from HA integration): Today={today_forecast:.1f}kWh, "
                 f"remaining={remaining:.1f}kWh, Tomorrow={tomorrow_forecast:.1f}kWh, "
-                f"hourly_points={len(hourly_forecast)}"
+                f"total_points={len(all_forecasts)}, today_points={len(hourly_forecast)}"
             )
 
             return {
@@ -1295,7 +1333,8 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                 "tomorrow_peak_kw": round(tomorrow_peak, 2) if tomorrow_peak else None,
                 "current_estimate_kw": round(current_estimate, 2) if current_estimate else None,
                 "hourly_forecast": hourly_forecast,  # For chart overlay
-                "forecast_periods": len(hourly_forecast),
+                "detailed_forecast": all_forecasts,  # Standardised for ABC
+                "forecast_periods": len(all_forecasts),
                 "last_update": dt_util.utcnow(),
                 "source": "solcast_integration",
             }
@@ -1552,6 +1591,14 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                 "tomorrow_peak_kw": round(tomorrow_peak, 2),
                 "current_estimate_kw": round(current_estimate, 2) if current_estimate else None,
                 "forecast_periods": len(forecasts),
+                "detailed_forecast": [
+                    {
+                        "period_end": dt_util.as_local(datetime.fromisoformat(f.get("period_end").replace("Z", "+00:00"))).isoformat(),
+                        "pv_estimate": f.get("pv_estimate")
+                    }
+                    for f in forecasts
+                    if f.get("period_end")
+                ],  # Standardised for ABC
                 "last_update": dt_util.utcnow(),
             }
 

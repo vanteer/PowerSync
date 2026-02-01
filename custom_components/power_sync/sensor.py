@@ -32,7 +32,9 @@ from .const import (
     DOMAIN,
     SENSOR_TYPE_CURRENT_PRICE,
     SENSOR_TYPE_CURRENT_IMPORT_PRICE,
+    SENSOR_TYPE_CURRENT_IMPORT_PRICE_CENTS,
     SENSOR_TYPE_CURRENT_EXPORT_PRICE,
+    SENSOR_TYPE_CURRENT_EXPORT_PRICE_CENTS,
     SENSOR_TYPE_SOLAR_POWER,
     SENSOR_TYPE_GRID_POWER,
     SENSOR_TYPE_BATTERY_POWER,
@@ -104,12 +106,13 @@ from .coordinator import AmberPriceCoordinator, TeslaEnergyCoordinator, DemandCh
 _LOGGER = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True)
 class PowerSyncSensorEntityDescription(SensorEntityDescription):
     """Describes PowerSync sensor entity."""
 
     value_fn: Callable[[Any], Any] | None = None
     attr_fn: Callable[[Any], dict[str, Any]] | None = None
+    suggested_object_id: str | None = None
 
 
 def _get_import_price(data):
@@ -119,6 +122,16 @@ def _get_import_price(data):
     for price in data.get("current", []):
         if price.get("channelType") == "general":
             return price.get("perKwh", 0) / 100
+    return None
+
+
+def _get_import_price_cents(data):
+    """Extract import (general) price from Amber data in cents."""
+    if not data or not data.get("current"):
+        return None
+    for price in data.get("current", []):
+        if price.get("channelType") == "general":
+            return float(price.get("perKwh", 0))
     return None
 
 
@@ -143,6 +156,17 @@ def _get_export_price(data):
     return None
 
 
+def _get_export_price_cents(data):
+    """Extract export earnings from Amber feedIn data in cents."""
+    if not data or not data.get("current"):
+        return None
+    for price in data.get("current", []):
+        if price.get("channelType") == "feedIn":
+            # Negate to convert to earnings
+            return -float(price.get("perKwh", 0))
+    return None
+
+
 PRICE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_CURRENT_IMPORT_PRICE,
@@ -151,6 +175,7 @@ PRICE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.MONETARY,
         suggested_display_precision=4,
         value_fn=_get_import_price,
+        suggested_object_id="power_sync_current_import_price",
         attr_fn=lambda data: {
             ATTR_PRICE_SPIKE: data.get("current", [{}])[0].get("spikeStatus")
             if data and data.get("current")
@@ -171,9 +196,27 @@ PRICE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         suggested_display_precision=4,
         icon="mdi:transmission-tower-export",
         value_fn=_get_export_price,
+        suggested_object_id="power_sync_current_export_price",
         attr_fn=lambda data: {
             "channel_type": "feedIn",
         },
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_CURRENT_IMPORT_PRICE_CENTS,
+        name="Current Import Price (¢)",
+        native_unit_of_measurement=f"¢/{UnitOfEnergy.KILO_WATT_HOUR}",
+        suggested_display_precision=1,
+        value_fn=_get_import_price_cents,
+        suggested_object_id="power_sync_current_import_price_cents",
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_CURRENT_EXPORT_PRICE_CENTS,
+        name="Current Export Price (¢)",
+        native_unit_of_measurement=f"¢/{UnitOfEnergy.KILO_WATT_HOUR}",
+        suggested_display_precision=1,
+        icon="mdi:transmission-tower-export",
+        value_fn=_get_export_price_cents,
+        suggested_object_id="power_sync_current_export_price_cents",
     ),
 )
 
@@ -186,6 +229,7 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=3,
         value_fn=lambda data: data.get("solar_power") if data else None,
+        suggested_object_id="power_sync_solar_power",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_GRID_POWER,
@@ -195,6 +239,7 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=3,
         value_fn=lambda data: data.get("grid_power") if data else None,
+        suggested_object_id="power_sync_grid_power",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_BATTERY_POWER,
@@ -204,6 +249,7 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=3,
         value_fn=lambda data: data.get("battery_power") if data else None,
+        suggested_object_id="power_sync_battery_power",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_HOME_LOAD,
@@ -213,6 +259,7 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=3,
         value_fn=lambda data: data.get("load_power") if data else None,
+        suggested_object_id="power_sync_home_load",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_BATTERY_LEVEL,
@@ -222,6 +269,7 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=1,
         value_fn=lambda data: data.get("battery_level") if data else None,
+        suggested_object_id="power_sync_battery_level",
     ),
 )
 
@@ -230,6 +278,7 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         key=SENSOR_TYPE_IN_DEMAND_CHARGE_PERIOD,
         name="In Demand Charge Period",
         value_fn=lambda data: data.get("in_peak_period", False) if data else False,
+        suggested_object_id="power_sync_in_demand_charge_period",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_PEAK_DEMAND_THIS_CYCLE,
@@ -239,6 +288,7 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=3,
         value_fn=lambda data: data.get("peak_demand_kw", 0.0) if data else 0.0,
+        suggested_object_id="power_sync_peak_demand_this_cycle",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DEMAND_CHARGE_COST,
@@ -247,6 +297,7 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.MONETARY,
         suggested_display_precision=2,
         value_fn=lambda data: data.get("estimated_cost", 0.0) if data else 0.0,
+        suggested_object_id="power_sync_demand_charge_cost",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_SUPPLY_CHARGE_COST,
@@ -256,6 +307,7 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL,  # MONETARY only supports 'total', not 'total_increasing'
         suggested_display_precision=2,
         value_fn=lambda data: data.get("daily_supply_charge_cost", 0.0) if data else 0.0,
+        suggested_object_id="power_sync_daily_supply_charge_cost",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_MONTHLY_SUPPLY_CHARGE,
@@ -264,6 +316,7 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.MONETARY,
         suggested_display_precision=2,
         value_fn=lambda data: data.get("monthly_supply_charge", 0.0) if data else 0.0,
+        suggested_object_id="power_sync_monthly_supply_charge",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_TOTAL_MONTHLY_COST,
@@ -273,6 +326,7 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL,
         suggested_display_precision=2,
         value_fn=lambda data: data.get("total_monthly_cost", 0.0) if data else 0.0,
+        suggested_object_id="power_sync_total_monthly_cost",
     ),
 )
 
@@ -291,6 +345,7 @@ AEMO_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             ATTR_AEMO_THRESHOLD: data.get("threshold") if data else None,
             "last_check": data.get("last_check") if data else None,
         },
+        suggested_object_id="power_sync_aemo_wholesale_price",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_AEMO_SPIKE_STATUS,
@@ -303,6 +358,7 @@ AEMO_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             ATTR_SPIKE_START_TIME: data.get("spike_start_time") if data else None,
             "last_price": data.get("last_price") if data else None,
         },
+        suggested_object_id="power_sync_aemo_spike_status",
     ),
 )
 
@@ -324,6 +380,7 @@ SOLCAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             "last_update": data.get("last_update").isoformat() if data and data.get("last_update") else None,
             "source": data.get("source", "api") if data else None,  # "solcast_integration" or "api"
         } if data else {},
+        suggested_object_id="power_sync_solcast_today",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_SOLCAST_TOMORROW,
@@ -336,6 +393,7 @@ SOLCAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         attr_fn=lambda data: {
             "peak_kw": data.get("tomorrow_peak_kw") if data else None,
         } if data else {},
+        suggested_object_id="power_sync_solcast_tomorrow",
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_SOLCAST_CURRENT,
@@ -349,6 +407,7 @@ SOLCAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         attr_fn=lambda data: {
             "forecast_periods": data.get("forecast_periods") if data else None,
         } if data else {},
+        suggested_object_id="power_sync_solcast_current",
     ),
 )
 
@@ -519,6 +578,8 @@ class AmberPriceSensor(CoordinatorEntity, SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
+        if description.suggested_object_id:
+            self._attr_suggested_object_id = description.suggested_object_id
 
     @property
     def native_value(self) -> Any:
@@ -551,6 +612,8 @@ class TeslaEnergySensor(CoordinatorEntity, SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
+        if description.suggested_object_id:
+            self._attr_suggested_object_id = description.suggested_object_id
 
     @property
     def native_value(self) -> Any:
@@ -576,6 +639,8 @@ class DemandChargeSensor(CoordinatorEntity, SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
+        if description.suggested_object_id:
+            self._attr_suggested_object_id = description.suggested_object_id
         self._entry = entry
 
     @property
@@ -628,6 +693,8 @@ class AEMOSpikeSensor(SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
+        if description.suggested_object_id:
+            self._attr_suggested_object_id = description.suggested_object_id
 
     @property
     def native_value(self) -> Any:
@@ -660,6 +727,8 @@ class SolcastForecastSensor(CoordinatorEntity, SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
+        if description.suggested_object_id:
+            self._attr_suggested_object_id = description.suggested_object_id
 
     @property
     def native_value(self) -> Any:
@@ -694,6 +763,7 @@ class TariffScheduleSensor(SensorEntity):
         self._attr_has_entity_name = True
         self._attr_name = "Tariff Schedule"
         self._attr_icon = "mdi:calendar-clock"
+        self._attr_suggested_object_id = "power_sync_tariff_schedule"
         self._unsub_dispatcher = None
 
     async def async_added_to_hass(self) -> None:
@@ -788,6 +858,7 @@ class SolarCurtailmentSensor(SensorEntity):
         self._attr_has_entity_name = True
         self._attr_name = "DC Solar Curtailment"
         self._attr_icon = "mdi:solar-power-variant"
+        self._attr_suggested_object_id = "power_sync_solar_curtailment"
         self._unsub_dispatcher = None
 
     async def async_added_to_hass(self) -> None:
@@ -905,6 +976,7 @@ class InverterStatusSensor(SensorEntity):
         self._attr_has_entity_name = True
         self._attr_name = "Inverter Status"
         self._attr_icon = "mdi:solar-panel"
+        self._attr_suggested_object_id = "power_sync_inverter_status"
         self._unsub_dispatcher = None
         self._unsub_interval = None
         self._cached_state = None
@@ -1201,6 +1273,12 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
         self._sensor_type = sensor_type
         self._attr_unique_id = f"{entry.entry_id}_{sensor_type}"
         self._attr_has_entity_name = True
+        
+        # Explicitly set object ID for stable entity IDs
+        if sensor_type == SENSOR_TYPE_FLOW_POWER_PRICE:
+            self._attr_suggested_object_id = "current_import_price"
+        else:
+            self._attr_suggested_object_id = "current_export_price"
 
         # Configure based on sensor type
         if sensor_type == SENSOR_TYPE_FLOW_POWER_PRICE:
@@ -1359,6 +1437,7 @@ class BatteryHealthSensor(SensorEntity):
         """Initialize the sensor."""
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{SENSOR_TYPE_BATTERY_HEALTH}"
+        self._attr_suggested_object_id = "power_sync_battery_health"
 
         # Battery health data (from service call)
         self._original_capacity_wh: float | None = None

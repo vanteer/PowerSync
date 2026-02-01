@@ -434,7 +434,9 @@ SERVICE_SYNC_NOW = "sync_now"
 # Sensor types
 SENSOR_TYPE_CURRENT_PRICE = "current_price"  # Legacy - kept for compatibility
 SENSOR_TYPE_CURRENT_IMPORT_PRICE = "current_import_price"
+SENSOR_TYPE_CURRENT_IMPORT_PRICE_CENTS = "current_import_price_cents"
 SENSOR_TYPE_CURRENT_EXPORT_PRICE = "current_export_price"
+SENSOR_TYPE_CURRENT_EXPORT_PRICE_CENTS = "current_export_price_cents"
 SENSOR_TYPE_FORECAST_PRICE = "forecast_price"
 SENSOR_TYPE_SOLAR_POWER = "solar_power"
 SENSOR_TYPE_GRID_POWER = "grid_power"
@@ -463,6 +465,7 @@ SENSOR_TYPE_TOTAL_MONTHLY_COST = "total_monthly_cost"
 SWITCH_TYPE_AUTO_SYNC = "auto_sync"
 SWITCH_TYPE_FORCE_DISCHARGE = "force_discharge"
 SWITCH_TYPE_FORCE_CHARGE = "force_charge"
+SWITCH_TYPE_ADVANCED_BATTERY_CONTROL = "advanced_battery_control"
 
 # Services for manual battery control
 SERVICE_FORCE_DISCHARGE = "force_discharge"
@@ -480,6 +483,53 @@ SERVICE_RESTORE_INVERTER = "restore_inverter"
 # Manual discharge/charge duration options (minutes)
 DISCHARGE_DURATIONS = [15, 30, 45, 60, 75, 90, 105, 120]
 DEFAULT_DISCHARGE_DURATION = 30
+
+# Advanced battery control (ABC) configuration keys (stored in ConfigEntry.options)
+CONF_ABC_ENABLED_DEFAULT = "abc_enabled_default"
+DEFAULT_ABC_ENABLED_DEFAULT = False
+
+CONF_ABC_EMERGENCY_MIN_SOC_PERCENT = "abc_emergency_min_soc_percent"
+CONF_ABC_HIGH_PRICE_MIN_SOC_PERCENT = "abc_high_price_min_soc_percent"
+CONF_ABC_OVERNIGHT_LOAD_W = "abc_overnight_load_w"
+CONF_ABC_EVENING_LOAD_W = "abc_evening_load_w"
+CONF_ABC_NIGHT_START = "abc_night_start"
+CONF_ABC_NIGHT_END = "abc_night_end"
+CONF_ABC_EVENING_PEAK_START = "abc_evening_peak_start"
+CONF_ABC_EVENING_PEAK_END = "abc_evening_peak_end"
+
+CONF_ABC_DAY_SPIKE_EXPORT_THRESHOLD_CENTS = "abc_day_spike_export_threshold_cents"
+CONF_ABC_EXPORT_MIN_THRESHOLD_CENTS = "abc_export_min_threshold_cents"
+CONF_ABC_VERY_HIGH_EXPORT_THRESHOLD_CENTS = "abc_very_high_export_threshold_cents"
+CONF_ABC_IMPORT_STABILISED_THRESHOLD_CENTS = "abc_import_stabilised_threshold_cents"
+CONF_ABC_TRANSIENT_DURATION_MIN = "abc_transient_duration_min"
+
+CONF_ABC_USE_SOLCAST_GUARDRAIL = "abc_use_solcast_guardrail"
+CONF_ABC_BUFFER_MIN_MINUTES = "abc_buffer_min_minutes"
+CONF_ABC_MODE_CHANGE_MIN_SECONDS = "abc_mode_change_min_seconds"
+
+# Defaults (safe + conservative)
+DEFAULT_ABC_EMERGENCY_MIN_SOC_PERCENT = 20
+DEFAULT_ABC_HIGH_PRICE_MIN_SOC_PERCENT = 40
+DEFAULT_ABC_OVERNIGHT_LOAD_W = 350
+DEFAULT_ABC_EVENING_LOAD_W = 800
+DEFAULT_ABC_NIGHT_START = "22:00"
+DEFAULT_ABC_NIGHT_END = "06:00"
+DEFAULT_ABC_EVENING_PEAK_START = "17:00"
+DEFAULT_ABC_EVENING_PEAK_END = "21:00"
+
+DEFAULT_ABC_DAY_SPIKE_EXPORT_THRESHOLD_CENTS = 25.0
+DEFAULT_ABC_EXPORT_MIN_THRESHOLD_CENTS = 0.0
+DEFAULT_ABC_VERY_HIGH_EXPORT_THRESHOLD_CENTS = 80.0
+DEFAULT_ABC_IMPORT_STABILISED_THRESHOLD_CENTS = 20.0
+DEFAULT_ABC_TRANSIENT_DURATION_MIN = 60
+
+DEFAULT_ABC_USE_SOLCAST_GUARDRAIL = True
+DEFAULT_ABC_BUFFER_MIN_MINUTES = 10
+DEFAULT_ABC_MODE_CHANGE_MIN_SECONDS = 60
+
+# Runtime storage keys (hass.data[DOMAIN][entry_id][...])
+DATA_ABC_CONTROLLER = "abc_controller"
+DATA_ABC_ACTIVE = "abc_active"
 
 # AEMO Spike sensors
 SENSOR_TYPE_AEMO_PRICE = "aemo_price"

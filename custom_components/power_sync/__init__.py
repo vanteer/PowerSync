@@ -126,6 +126,12 @@ from .const import (
     CONF_FORECAST_DISCREPANCY_ALERT,
     CONF_FORECAST_DISCREPANCY_THRESHOLD,
     DEFAULT_FORECAST_DISCREPANCY_THRESHOLD,
+    # Price spike alert configuration
+    CONF_PRICE_SPIKE_ALERT,
+    CONF_PRICE_SPIKE_IMPORT_THRESHOLD,
+    CONF_PRICE_SPIKE_EXPORT_THRESHOLD,
+    DEFAULT_PRICE_SPIKE_IMPORT_THRESHOLD,
+    DEFAULT_PRICE_SPIKE_EXPORT_THRESHOLD,
     # Alpha: Force tariff mode toggle
     CONF_FORCE_TARIFF_MODE_TOGGLE,
     # AC-Coupled Inverter Curtailment configuration
@@ -161,6 +167,12 @@ from .const import (
     CONF_SIGENERGY_TOKEN_EXPIRES_AT,
     # Battery system selection
     CONF_BATTERY_SYSTEM,
+    # Octopus Energy UK configuration
+    CONF_OCTOPUS_PRODUCT_CODE,
+    CONF_OCTOPUS_TARIFF_CODE,
+    CONF_OCTOPUS_REGION,
+    CONF_OCTOPUS_EXPORT_PRODUCT_CODE,
+    CONF_OCTOPUS_EXPORT_TARIFF_CODE,
     # OpenWeatherMap for automations weather triggers
     CONF_OPENWEATHERMAP_API_KEY,
     # EV BLE configuration
@@ -179,6 +191,8 @@ from .const import (
     TESLA_BLE_NUMBER_CHARGING_AMPS,
     TESLA_BLE_NUMBER_CHARGING_LIMIT,
     TESLA_BLE_BUTTON_WAKE_UP,
+    # Tesla integrations for device discovery
+    TESLA_INTEGRATIONS,
 )
 from .inverters import get_inverter_controller
 from .coordinator import (
@@ -187,6 +201,7 @@ from .coordinator import (
     SigenergyEnergyCoordinator,
     DemandChargeCoordinator,
     AEMOSensorCoordinator,
+    OctopusPriceCoordinator,
 )
 import re
 
@@ -414,7 +429,7 @@ logging.getLogger("custom_components.power_sync.inverters.sigenergy").setLevel(l
 logging.getLogger("custom_components.power_sync.websocket_client").setLevel(logging.DEBUG)
 logging.getLogger("custom_components.power_sync.tariff_converter").setLevel(logging.DEBUG)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH, Platform.SELECT]
 
 # Storage version for persisting data across HA restarts
 STORAGE_VERSION = 1
@@ -2087,6 +2102,19 @@ class ProviderConfigView(HomeAssistantView):
                         CONF_FORECAST_DISCREPANCY_THRESHOLD,
                         entry.data.get(CONF_FORECAST_DISCREPANCY_THRESHOLD, DEFAULT_FORECAST_DISCREPANCY_THRESHOLD)
                     ),
+                    # Price Spike Alert settings
+                    "price_spike_alert": entry.options.get(
+                        CONF_PRICE_SPIKE_ALERT,
+                        entry.data.get(CONF_PRICE_SPIKE_ALERT, False)
+                    ),
+                    "price_spike_import_threshold": entry.options.get(
+                        CONF_PRICE_SPIKE_IMPORT_THRESHOLD,
+                        entry.data.get(CONF_PRICE_SPIKE_IMPORT_THRESHOLD, DEFAULT_PRICE_SPIKE_IMPORT_THRESHOLD)
+                    ),
+                    "price_spike_export_threshold": entry.options.get(
+                        CONF_PRICE_SPIKE_EXPORT_THRESHOLD,
+                        entry.data.get(CONF_PRICE_SPIKE_EXPORT_THRESHOLD, DEFAULT_PRICE_SPIKE_EXPORT_THRESHOLD)
+                    ),
                     # Export Boost settings
                     "export_boost_enabled": entry.options.get(
                         CONF_EXPORT_BOOST_ENABLED,
@@ -2307,6 +2335,9 @@ class ProviderConfigView(HomeAssistantView):
                 "settled_prices_only": CONF_SETTLED_PRICES_ONLY,
                 "forecast_discrepancy_alert": CONF_FORECAST_DISCREPANCY_ALERT,
                 "forecast_discrepancy_threshold": CONF_FORECAST_DISCREPANCY_THRESHOLD,
+                "price_spike_alert": CONF_PRICE_SPIKE_ALERT,
+                "price_spike_import_threshold": CONF_PRICE_SPIKE_IMPORT_THRESHOLD,
+                "price_spike_export_threshold": CONF_PRICE_SPIKE_EXPORT_THRESHOLD,
                 "export_boost_enabled": CONF_EXPORT_BOOST_ENABLED,
                 "export_price_offset": CONF_EXPORT_PRICE_OFFSET,
                 "export_min_price": CONF_EXPORT_MIN_PRICE,
@@ -2460,157 +2491,424 @@ class TariffPriceView(HomeAssistantView):
             )
 
     async def _fetch_tesla_tariff(self, entry: ConfigEntry) -> dict | None:
-        """Fetch tariff from Tesla site_info API and extract current prices."""
+        """Fetch tariff from Tesla site_info API and extract current prices.
+
+        Delegates to the standalone fetch_tesla_tariff_schedule function.
+        """
+        return await fetch_tesla_tariff_schedule(self._hass, entry)
+
+
+async def fetch_tesla_tariff_schedule(hass: HomeAssistant, entry: ConfigEntry) -> dict | None:
+    """Fetch tariff from Tesla site_info API and extract full TOU schedule.
+
+    This is used for:
+    1. TariffPriceView HTTP endpoint
+    2. EV charging planner tariff forecast
+    3. Non-Amber user initialization on startup
+
+    Returns a dict with:
+    - current_period: Current TOU period name
+    - current_season: Current season name
+    - buy_price: Current buy price in cents/kWh
+    - sell_price: Current sell price in cents/kWh
+    - buy_rates: Dict of period_name -> rate in $/kWh
+    - sell_rates: Dict of period_name -> rate in $/kWh
+    - tou_periods: Full TOU schedule for planning
+    - seasons: Season definitions
+    - utility: Utility name
+    - plan_name: Plan name
+    - last_sync: Timestamp
+    """
+    try:
+        current_token, provider = get_tesla_api_token(hass, entry)
+        site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+
+        if not site_id or not current_token:
+            _LOGGER.warning("Missing Tesla site ID or token for tariff fetch")
+            return None
+
+        session = async_get_clientsession(hass)
+        headers = {
+            "Authorization": f"Bearer {current_token}",
+            "Content-Type": "application/json",
+        }
+        api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+        # Fetch site_info which contains tariff_content
+        async with session.get(
+            f"{api_base}/api/1/energy_sites/{site_id}/site_info",
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                _LOGGER.error(f"Failed to get site_info for tariff: {response.status} - {text}")
+                return None
+
+            data = await response.json()
+            site_info = data.get("response", {})
+
+        # Get tariff_content from site_info
+        tariff = site_info.get("tariff_content", {})
+        if not tariff:
+            _LOGGER.warning("No tariff_content in Tesla site_info response")
+            return None
+
+        _LOGGER.debug(f"Tesla tariff_content utility: {tariff.get('utility')}, name: {tariff.get('name')}")
+
+        # Determine current season and TOU period
+        from datetime import datetime as dt
+        from zoneinfo import ZoneInfo
+
+        # Get timezone from site_info
+        tz_name = site_info.get("installation_time_zone", "UTC")
         try:
-            current_token, provider = get_tesla_api_token(self._hass, entry)
-            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+            tz = ZoneInfo(tz_name)
+        except:
+            tz = ZoneInfo("UTC")
+        now = dt.now(tz)
+        current_hour = now.hour
+        current_dow = now.weekday()  # 0=Monday, 6=Sunday
 
-            if not site_id or not current_token:
-                _LOGGER.warning("Missing Tesla site ID or token")
-                return None
+        # Find current season
+        seasons = tariff.get("seasons", {})
+        current_season = None
+        for season_name, season_data in seasons.items():
+            from_month = season_data.get("fromMonth", 0)
+            to_month = season_data.get("toMonth", 0)
+            if from_month and to_month:
+                if from_month <= now.month <= to_month:
+                    current_season = season_name
+                    break
+        if not current_season:
+            current_season = "Summer" if "Summer" in seasons else next(iter(seasons.keys()), None)
 
-            session = async_get_clientsession(self._hass)
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Content-Type": "application/json",
-            }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+        _LOGGER.debug(f"Current season: {current_season}, hour: {current_hour}, dow: {current_dow}")
 
-            # Fetch site_info which contains tariff_content
-            async with session.get(
-                f"{api_base}/api/1/energy_sites/{site_id}/site_info",
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status != 200:
-                    text = await response.text()
-                    _LOGGER.error(f"Failed to get site_info: {response.status} - {text}")
-                    return None
+        # Find current TOU period
+        tou_periods = seasons.get(current_season, {}).get("tou_periods", {})
+        current_period = None
+        for period_name, period_data in tou_periods.items():
+            # Handle both list format and object format
+            periods_list = period_data if isinstance(period_data, list) else []
+            for period in periods_list:
+                from_dow = period.get("fromDayOfWeek", 0)
+                to_dow = period.get("toDayOfWeek", 6)
+                from_hour = period.get("fromHour", 0)
+                to_hour = period.get("toHour", 24)
 
-                data = await response.json()
-                site_info = data.get("response", {})
+                # Check day of week (Tesla uses 0=Sunday, Python uses 0=Monday)
+                tesla_dow = (current_dow + 1) % 7  # Convert Python dow to Tesla dow
+                if from_dow <= tesla_dow <= to_dow:
+                    # Check time - handle overnight periods (e.g., 21:00 to 10:00)
+                    if from_hour <= to_hour:
+                        # Normal period (e.g., 10:00 to 14:00)
+                        if from_hour <= current_hour < to_hour:
+                            current_period = period_name
+                            break
+                    else:
+                        # Overnight period (e.g., 21:00 to 10:00)
+                        if current_hour >= from_hour or current_hour < to_hour:
+                            current_period = period_name
+                            break
+            if current_period:
+                break
 
-            # Get tariff_content from site_info
-            tariff = site_info.get("tariff_content", {})
-            if not tariff:
-                _LOGGER.warning("No tariff_content in Tesla site_info response")
-                return None
+        if not current_period:
+            current_period = "ALL"
+        _LOGGER.info(f"Tesla TOU period: {current_period}")
 
-            _LOGGER.debug(f"Tesla tariff_content utility: {tariff.get('utility')}, name: {tariff.get('name')}")
+        # Get energy charges for current season
+        # tariff_content format: energy_charges.Summer.ON_PEAK = 0.48 (no 'rates' key)
+        energy_charges = tariff.get("energy_charges", {})
+        season_charges = energy_charges.get(current_season, {})
 
-            # Determine current season and TOU period
-            from datetime import datetime as dt
-            from zoneinfo import ZoneInfo
+        # Handle both formats: direct values or nested under 'rates'
+        if "rates" in season_charges:
+            buy_rates = season_charges.get("rates", {})
+        else:
+            buy_rates = {k: v for k, v in season_charges.items() if isinstance(v, (int, float))}
 
-            # Get timezone from site_info
-            tz_name = site_info.get("installation_time_zone", "UTC")
-            try:
-                tz = ZoneInfo(tz_name)
-            except:
-                tz = ZoneInfo("UTC")
-            now = dt.now(tz)
-            current_hour = now.hour
-            current_dow = now.weekday()  # 0=Monday, 6=Sunday
+        # Get sell tariff
+        sell_tariff = tariff.get("sell_tariff", {})
+        sell_energy_charges = sell_tariff.get("energy_charges", {})
+        sell_season_charges = sell_energy_charges.get(current_season, {})
+        if "rates" in sell_season_charges:
+            sell_rates = sell_season_charges.get("rates", {})
+        else:
+            sell_rates = {k: v for k, v in sell_season_charges.items() if isinstance(v, (int, float))}
 
-            # Find current season
-            seasons = tariff.get("seasons", {})
-            current_season = None
-            for season_name, season_data in seasons.items():
-                from_month = season_data.get("fromMonth", 0)
-                to_month = season_data.get("toMonth", 0)
-                if from_month and to_month:
-                    if from_month <= now.month <= to_month:
-                        current_season = season_name
-                        break
-            if not current_season:
-                current_season = "Summer" if "Summer" in seasons else next(iter(seasons.keys()), None)
+        # Get current prices
+        current_buy_price = buy_rates.get(current_period, buy_rates.get("ALL", 0))
+        current_sell_price = sell_rates.get(current_period, sell_rates.get("ALL", 0))
 
-            _LOGGER.debug(f"Current season: {current_season}, hour: {current_hour}, dow: {current_dow}")
+        # Convert from $/kWh to c/kWh (multiply by 100)
+        current_buy_cents = round(current_buy_price * 100, 2)
+        current_sell_cents = round(current_sell_price * 100, 2)
 
-            # Find current TOU period
-            tou_periods = seasons.get(current_season, {}).get("tou_periods", {})
-            current_period = None
-            for period_name, period_data in tou_periods.items():
-                # Handle both list format and object format
-                periods_list = period_data if isinstance(period_data, list) else []
-                for period in periods_list:
-                    from_dow = period.get("fromDayOfWeek", 0)
-                    to_dow = period.get("toDayOfWeek", 6)
-                    from_hour = period.get("fromHour", 0)
-                    to_hour = period.get("toHour", 24)
+        _LOGGER.info(f"Tesla tariff: Buy {current_buy_cents}c/kWh, Sell {current_sell_cents}c/kWh (period: {current_period})")
 
-                    # Check day of week (Tesla uses 0=Sunday, Python uses 0=Monday)
-                    tesla_dow = (current_dow + 1) % 7  # Convert Python dow to Tesla dow
-                    if from_dow <= tesla_dow <= to_dow:
-                        # Check time - handle overnight periods (e.g., 21:00 to 10:00)
-                        if from_hour <= to_hour:
-                            # Normal period (e.g., 10:00 to 14:00)
-                            if from_hour <= current_hour < to_hour:
-                                current_period = period_name
-                                break
-                        else:
-                            # Overnight period (e.g., 21:00 to 10:00)
-                            if current_hour >= from_hour or current_hour < to_hour:
-                                current_period = period_name
-                                break
-                if current_period:
+        # Log TOU periods for debugging
+        if tou_periods:
+            period_summary = []
+            for period_name, periods in tou_periods.items():
+                if isinstance(periods, list) and periods:
+                    first = periods[0]
+                    period_summary.append(f"{period_name}: {first.get('fromHour', 0)}-{first.get('toHour', 24)}")
+            _LOGGER.info(f"Tesla TOU periods: {', '.join(period_summary)}")
+
+            # Log rates for each period
+            for period_name in tou_periods.keys():
+                rate = buy_rates.get(period_name, "N/A")
+                if isinstance(rate, (int, float)):
+                    _LOGGER.info(f"  {period_name}: {rate * 100:.1f}c/kWh")
+
+        tariff_result = {
+            "current_period": current_period,
+            "current_season": current_season,
+            "buy_price": current_buy_cents,
+            "sell_price": current_sell_cents,
+            "buy_rates": buy_rates,
+            "sell_rates": sell_rates,
+            "tou_periods": tou_periods,  # Include full TOU schedule for planning
+            "seasons": seasons,  # Include season definitions
+            "utility": tariff.get("utility", "Unknown"),
+            "plan_name": tariff.get("name", "Unknown"),
+            "last_sync": now.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        # Store for future use
+        if DOMAIN in hass.data and entry.entry_id in hass.data[DOMAIN]:
+            hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = tariff_result
+            _LOGGER.info(f"✅ Tesla tariff schedule stored with {len(tou_periods)} TOU periods")
+
+        return tariff_result
+
+    except Exception as e:
+        _LOGGER.error(f"Error fetching Tesla tariff: {e}", exc_info=True)
+        return None
+
+
+def convert_custom_tariff_to_schedule(custom_tariff: dict) -> dict:
+    """Convert custom_tariff format to tariff_schedule format.
+
+    This converts the user-configured custom tariff (Tesla tariff_content format)
+    to the internal tariff_schedule format used by the EV charging planner.
+
+    Args:
+        custom_tariff: Custom tariff configuration from automation_store
+
+    Returns:
+        tariff_schedule dict with: current_period, current_season, buy_price, sell_price,
+        buy_rates, sell_rates, tou_periods, seasons, utility, plan_name, last_sync
+    """
+    from datetime import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    try:
+        # Get current time for determining current period
+        now = dt.now()
+        current_hour = now.hour
+        current_dow = now.weekday()  # 0=Monday, 6=Sunday
+
+        # Extract seasons from custom tariff
+        seasons = custom_tariff.get("seasons", {})
+
+        # Find current season
+        current_season = None
+        for season_name, season_data in seasons.items():
+            from_month = season_data.get("fromMonth", 1)
+            to_month = season_data.get("toMonth", 12)
+            # Handle year-spanning seasons (e.g., Nov-Feb)
+            if from_month <= to_month:
+                if from_month <= now.month <= to_month:
+                    current_season = season_name
+                    break
+            else:
+                if now.month >= from_month or now.month <= to_month:
+                    current_season = season_name
                     break
 
-            if not current_period:
-                current_period = "ALL"
-            _LOGGER.info(f"Current TOU period: {current_period}")
+        if not current_season:
+            # Default to first season or "All Year"
+            current_season = "All Year" if "All Year" in seasons else next(iter(seasons.keys()), "All Year")
 
-            # Get energy charges for current season
-            # tariff_content format: energy_charges.Summer.ON_PEAK = 0.48 (no 'rates' key)
-            energy_charges = tariff.get("energy_charges", {})
-            season_charges = energy_charges.get(current_season, {})
+        _LOGGER.debug(f"Custom tariff - Current season: {current_season}, hour: {current_hour}, dow: {current_dow}")
 
-            # Handle both formats: direct values or nested under 'rates'
-            if "rates" in season_charges:
-                buy_rates = season_charges.get("rates", {})
-            else:
-                buy_rates = {k: v for k, v in season_charges.items() if isinstance(v, (int, float))}
+        # Get TOU periods for current season
+        tou_periods = seasons.get(current_season, {}).get("tou_periods", {})
 
-            # Get sell tariff
-            sell_tariff = tariff.get("sell_tariff", {})
-            sell_energy_charges = sell_tariff.get("energy_charges", {})
-            sell_season_charges = sell_energy_charges.get(current_season, {})
-            if "rates" in sell_season_charges:
-                sell_rates = sell_season_charges.get("rates", {})
-            else:
-                sell_rates = {k: v for k, v in sell_season_charges.items() if isinstance(v, (int, float))}
+        # Find current TOU period
+        current_period = None
+        for period_name, period_data in tou_periods.items():
+            periods_list = period_data if isinstance(period_data, list) else []
+            for period in periods_list:
+                from_dow = period.get("fromDayOfWeek", 0)
+                to_dow = period.get("toDayOfWeek", 6)
+                from_hour = period.get("fromHour", 0)
+                to_hour = period.get("toHour", 24)
 
-            # Get current prices
-            current_buy_price = buy_rates.get(current_period, buy_rates.get("ALL", 0))
-            current_sell_price = sell_rates.get(current_period, sell_rates.get("ALL", 0))
+                # Check day of week (Tesla format: 0=Sunday, Python: 0=Monday)
+                tesla_dow = (current_dow + 1) % 7
+                if from_dow <= tesla_dow <= to_dow:
+                    # Handle overnight periods (e.g., 21:00 to 07:00)
+                    if from_hour <= to_hour:
+                        # Normal period
+                        if from_hour <= current_hour < to_hour:
+                            current_period = period_name
+                            break
+                    else:
+                        # Overnight period
+                        if current_hour >= from_hour or current_hour < to_hour:
+                            current_period = period_name
+                            break
+            if current_period:
+                break
 
-            # Convert from $/kWh to c/kWh (multiply by 100)
-            current_buy_cents = round(current_buy_price * 100, 2)
-            current_sell_cents = round(current_sell_price * 100, 2)
+        if not current_period:
+            current_period = "OFF_PEAK"  # Default to off-peak
 
-            _LOGGER.info(f"Tesla tariff prices - Buy: {current_buy_cents}c/kWh, Sell: {current_sell_cents}c/kWh (period: {current_period})")
+        _LOGGER.debug(f"Custom tariff - Current TOU period: {current_period}")
 
-            tariff_result = {
-                "current_period": current_period,
-                "current_season": current_season,
-                "buy_price": current_buy_cents,
-                "sell_price": current_sell_cents,
-                "buy_rates": buy_rates,
-                "sell_rates": sell_rates,
-                "utility": tariff.get("utility", "Unknown"),
-                "plan_name": tariff.get("name", "Unknown"),
-                "last_sync": now.strftime("%Y-%m-%d %H:%M:%S"),
-            }
+        # Get energy charges
+        energy_charges = custom_tariff.get("energy_charges", {})
+        season_charges = energy_charges.get(current_season, {})
 
-            # Store for future use
-            if DOMAIN in self._hass.data and entry.entry_id in self._hass.data[DOMAIN]:
-                self._hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = tariff_result
+        # Build buy_rates dict ($/kWh)
+        buy_rates = {}
+        for period, rate in season_charges.items():
+            if isinstance(rate, (int, float)):
+                buy_rates[period] = rate
 
-            return tariff_result
+        # Get sell tariff / feed-in tariff
+        sell_tariff = custom_tariff.get("sell_tariff", {})
+        sell_energy_charges = sell_tariff.get("energy_charges", {})
+        sell_season_charges = sell_energy_charges.get(current_season, {})
 
-        except Exception as e:
-            _LOGGER.error(f"Error fetching Tesla tariff: {e}", exc_info=True)
-            return None
+        # Build sell_rates dict ($/kWh)
+        sell_rates = {}
+        for period, rate in sell_season_charges.items():
+            if isinstance(rate, (int, float)):
+                sell_rates[period] = rate
+
+        # Get current prices
+        current_buy_price = buy_rates.get(current_period, buy_rates.get("ALL", buy_rates.get("OFF_PEAK", 0)))
+        current_sell_price = sell_rates.get(current_period, sell_rates.get("ALL", 0))
+
+        # Convert from $/kWh to c/kWh
+        current_buy_cents = round(current_buy_price * 100, 2)
+        current_sell_cents = round(current_sell_price * 100, 2)
+
+        _LOGGER.info(f"Custom tariff: Buy {current_buy_cents}c/kWh, Sell {current_sell_cents}c/kWh (period: {current_period})")
+
+        return {
+            "current_period": current_period,
+            "current_season": current_season,
+            "buy_price": current_buy_cents,
+            "sell_price": current_sell_cents,
+            "buy_rates": buy_rates,
+            "sell_rates": sell_rates,
+            "tou_periods": tou_periods,
+            "seasons": seasons,
+            "utility": custom_tariff.get("utility", "Custom"),
+            "plan_name": custom_tariff.get("name", "Custom Tariff"),
+            "last_sync": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "is_custom": True,  # Flag to indicate this is a custom tariff
+        }
+
+    except Exception as e:
+        _LOGGER.error(f"Error converting custom tariff to schedule: {e}", exc_info=True)
+        return {}
+
+
+def get_current_price_from_tariff_schedule(tariff_schedule: dict) -> tuple[float, float, str]:
+    """Calculate current buy/sell price from tariff_schedule TOU periods.
+
+    This recalculates the current TOU period and price in real-time based on
+    the stored TOU periods, ensuring prices update when periods change.
+
+    Args:
+        tariff_schedule: Tariff schedule dict with tou_periods, buy_rates, sell_rates
+
+    Returns:
+        Tuple of (buy_price_cents, sell_price_cents, current_period)
+    """
+    from datetime import datetime as dt
+
+    try:
+        now = dt.now()
+        current_hour = now.hour
+        current_dow = now.weekday()  # Python: 0=Monday, 6=Sunday
+
+        # Get TOU periods and rates
+        tou_periods = tariff_schedule.get("tou_periods", {})
+        buy_rates = tariff_schedule.get("buy_rates", {})
+        sell_rates = tariff_schedule.get("sell_rates", {})
+
+        # If no TOU periods, use cached prices
+        if not tou_periods:
+            return (
+                tariff_schedule.get("buy_price", 25.0),
+                tariff_schedule.get("sell_price", 8.0),
+                tariff_schedule.get("current_period", "UNKNOWN")
+            )
+
+        # Find current TOU period
+        current_period = None
+        for period_name, period_data in tou_periods.items():
+            periods_list = period_data if isinstance(period_data, list) else []
+            for period in periods_list:
+                from_dow = period.get("fromDayOfWeek", 0)
+                to_dow = period.get("toDayOfWeek", 6)
+                from_hour = period.get("fromHour", 0)
+                to_hour = period.get("toHour", 24)
+
+                # Check day of week (Tesla format: 0=Sunday, Python: 0=Monday)
+                tesla_dow = (current_dow + 1) % 7
+                if from_dow <= tesla_dow <= to_dow:
+                    # Handle overnight periods (e.g., 21:00 to 07:00)
+                    if from_hour <= to_hour:
+                        # Normal period
+                        if from_hour <= current_hour < to_hour:
+                            current_period = period_name
+                            break
+                    else:
+                        # Overnight period
+                        if current_hour >= from_hour or current_hour < to_hour:
+                            current_period = period_name
+                            break
+            if current_period:
+                break
+
+        if not current_period:
+            current_period = "OFF_PEAK"  # Default to off-peak
+
+        # Get prices for current period (rates are in $/kWh, convert to cents)
+        # Note: buy_rates may already be in cents if from custom tariff, or $/kWh if from Tesla
+        buy_rate = buy_rates.get(current_period, buy_rates.get("ALL", buy_rates.get("OFF_PEAK", 0.25)))
+        sell_rate = sell_rates.get(current_period, sell_rates.get("ALL", 0.08))
+
+        # Convert to cents if rates appear to be in $/kWh (< 1.0)
+        if buy_rate < 1.0:
+            buy_price_cents = round(buy_rate * 100, 2)
+        else:
+            buy_price_cents = buy_rate
+
+        if sell_rate < 1.0:
+            sell_price_cents = round(sell_rate * 100, 2)
+        else:
+            sell_price_cents = sell_rate
+
+        return (buy_price_cents, sell_price_cents, current_period)
+
+    except Exception as e:
+        _LOGGER.debug(f"Error calculating price from TOU periods: {e}")
+        # Fallback to cached prices
+        return (
+            tariff_schedule.get("buy_price", 25.0),
+            tariff_schedule.get("sell_price", 8.0),
+            "UNKNOWN"
+        )
 
 
 class AutomationsView(HomeAssistantView):
@@ -2885,6 +3183,168 @@ class AutomationGroupsView(HomeAssistantView):
             })
 
 
+class CustomTariffView(HomeAssistantView):
+    """HTTP view to manage custom tariff for non-Amber users.
+
+    This allows Globird/AEMO VPP/Other users to define their TOU tariff structure
+    which is then used for EV charging price decisions and Sigenergy Cloud tariff sync.
+    """
+
+    url = "/api/power_sync/custom_tariff"
+    name = "api:power_sync:custom_tariff"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    def _get_store(self):
+        """Get the automation store from hass.data."""
+        if DOMAIN not in self._hass.data:
+            return None
+        # Find any config entry to get the automation store
+        for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
+            if isinstance(entry_data, dict) and "automation_store" in entry_data:
+                return entry_data["automation_store"]
+        return None
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request - return current custom tariff."""
+        _LOGGER.info("📱 Custom tariff HTTP GET request")
+
+        store = self._get_store()
+        if not store:
+            return web.json_response(
+                {"success": False, "error": "Automation store not initialized"},
+                status=503
+            )
+
+        try:
+            custom_tariff = store.get_custom_tariff()
+            return web.json_response({
+                "success": True,
+                "custom_tariff": custom_tariff
+            })
+        except Exception as e:
+            _LOGGER.error(f"Error fetching custom tariff: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle POST request - save custom tariff."""
+        _LOGGER.info("📱 Custom tariff HTTP POST request")
+
+        store = self._get_store()
+        if not store:
+            return web.json_response(
+                {"success": False, "error": "Automation store not initialized"},
+                status=503
+            )
+
+        try:
+            data = await request.json()
+            _LOGGER.debug(f"📱 Saving custom tariff: name={data.get('name')}")
+
+            # Validate required fields
+            if not data.get("name"):
+                return web.json_response(
+                    {"success": False, "error": "Tariff name is required"},
+                    status=400
+                )
+
+            if not data.get("energy_charges"):
+                return web.json_response(
+                    {"success": False, "error": "Energy charges are required"},
+                    status=400
+                )
+
+            store.set_custom_tariff(data)
+            await store.async_save()
+
+            # Also update the tariff_schedule in hass.data for immediate use
+            tariff_schedule = convert_custom_tariff_to_schedule(data)
+            for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
+                if isinstance(entry_data, dict) and "automation_store" in entry_data:
+                    entry_data["tariff_schedule"] = tariff_schedule
+                    _LOGGER.info(f"Updated tariff_schedule in hass.data for entry {entry_id}")
+                    break
+
+            return web.json_response({
+                "success": True,
+                "custom_tariff": store.get_custom_tariff()
+            })
+        except Exception as e:
+            _LOGGER.error(f"Error saving custom tariff: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+    async def delete(self, request: web.Request) -> web.Response:
+        """Handle DELETE request - remove custom tariff."""
+        _LOGGER.info("📱 Custom tariff HTTP DELETE request")
+
+        store = self._get_store()
+        if not store:
+            return web.json_response(
+                {"success": False, "error": "Automation store not initialized"},
+                status=503
+            )
+
+        try:
+            deleted = store.delete_custom_tariff()
+            await store.async_save()
+
+            # Clear tariff_schedule in hass.data
+            for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
+                if isinstance(entry_data, dict) and "automation_store" in entry_data:
+                    entry_data.pop("tariff_schedule", None)
+                    break
+
+            return web.json_response({
+                "success": True,
+                "deleted": deleted
+            })
+        except Exception as e:
+            _LOGGER.error(f"Error deleting custom tariff: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+
+class CustomTariffTemplatesView(HomeAssistantView):
+    """HTTP view to get preset tariff templates."""
+
+    url = "/api/power_sync/custom_tariff/templates"
+    name = "api:power_sync:custom_tariff_templates"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request - return preset tariff templates."""
+        from .tariff_templates import TARIFF_TEMPLATES
+
+        _LOGGER.info("📱 Custom tariff templates HTTP GET request")
+
+        try:
+            return web.json_response({
+                "success": True,
+                "templates": TARIFF_TEMPLATES
+            })
+        except Exception as e:
+            _LOGGER.error(f"Error fetching tariff templates: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+
 class PushTokenRegisterView(HomeAssistantView):
     """HTTP view to register push notification tokens."""
 
@@ -3038,8 +3498,7 @@ class EVStatusView(HomeAssistantView):
     name = "api:power_sync:ev:status"
     requires_auth = True
 
-    # Supported Tesla integrations in HA
-    TESLA_INTEGRATIONS = ["tesla_fleet", "teslemetry"]
+    # Use imported TESLA_INTEGRATIONS from const.py
 
     def __init__(self, hass: HomeAssistant):
         """Initialize the view."""
@@ -3090,7 +3549,7 @@ class EVStatusView(HomeAssistantView):
             fleet_api_available = False
 
             if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
-                for integration in self.TESLA_INTEGRATIONS:
+                for integration in TESLA_INTEGRATIONS:
                     if integration in self._hass.config_entries.async_domains():
                         entries = self._hass.config_entries.async_entries(integration)
                         if entries:
@@ -3113,7 +3572,7 @@ class EVStatusView(HomeAssistantView):
 
                 for device in device_registry.devices.values():
                     for identifier in device.identifiers:
-                        if identifier[0] in self.TESLA_INTEGRATIONS:
+                        if identifier[0] in TESLA_INTEGRATIONS:
                             potential_vin = identifier[1]
                             if len(str(potential_vin)) == 17 and not str(potential_vin).isdigit():
                                 vehicle_count += 1
@@ -3153,8 +3612,7 @@ class EVVehiclesView(HomeAssistantView):
     name = "api:power_sync:ev:vehicles"
     requires_auth = True
 
-    # Supported Tesla integrations in HA
-    TESLA_INTEGRATIONS = ["tesla_fleet", "teslemetry"]
+    # Use imported TESLA_INTEGRATIONS from const.py
 
     def __init__(self, hass: HomeAssistant):
         """Initialize the view."""
@@ -3259,7 +3717,7 @@ class EVVehiclesView(HomeAssistantView):
             tesla_entries = []
 
             if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
-                for integration in self.TESLA_INTEGRATIONS:
+                for integration in TESLA_INTEGRATIONS:
                     if integration in self._hass.config_entries.async_domains():
                         entries = self._hass.config_entries.async_entries(integration)
                         if entries:
@@ -3279,7 +3737,7 @@ class EVVehiclesView(HomeAssistantView):
                         vin = None
 
                         for identifier in device.identifiers:
-                            if identifier[0] in self.TESLA_INTEGRATIONS:
+                            if identifier[0] in TESLA_INTEGRATIONS:
                                 potential_vin = str(identifier[1])
                                 if len(potential_vin) == 17 and not potential_vin.isdigit():
                                     is_tesla_vehicle = True
@@ -3509,8 +3967,7 @@ class EVVehicleCommandView(HomeAssistantView):
     name = "api:power_sync:ev:vehicles:command"
     requires_auth = True
 
-    # Supported Tesla integrations
-    TESLA_INTEGRATIONS = ["tesla_fleet", "teslemetry"]
+    # Use imported TESLA_INTEGRATIONS from const.py
 
     def __init__(self, hass: HomeAssistant):
         """Initialize the view."""
@@ -3522,6 +3979,34 @@ class EVVehicleCommandView(HomeAssistantView):
         if entries:
             return dict(entries[0].options)
         return {}
+
+    def _get_vin_from_vehicle_id(self, vehicle_id: str) -> str | None:
+        """Look up VIN from vehicle_id (sequential number in vehicle list).
+
+        The mobile app sends vehicle_id as a sequential number (1, 2, 3...)
+        from the vehicles list. We need to map this back to the actual VIN.
+        """
+        device_registry = dr.async_get(self._hass)
+
+        # Build list of vehicles in same order as EVVehiclesView
+        vehicle_num = 0
+        for device in device_registry.devices.values():
+            for identifier in device.identifiers:
+                if len(identifier) < 2:
+                    continue
+                domain = identifier[0]
+                identifier_value = str(identifier[1])
+                if domain in TESLA_INTEGRATIONS:
+                    # Check if this looks like a VIN (17 chars, not all digits)
+                    if len(identifier_value) == 17 and not identifier_value.isdigit():
+                        vehicle_num += 1
+                        if str(vehicle_num) == str(vehicle_id):
+                            _LOGGER.debug(f"Mapped vehicle_id {vehicle_id} to VIN {identifier_value}")
+                            return identifier_value
+                        break
+
+        _LOGGER.warning(f"Could not find VIN for vehicle_id {vehicle_id}")
+        return None
 
     async def _get_tesla_ev_entity(self, entity_pattern: str, vehicle_vin: str | None = None) -> str | None:
         """Find a Tesla EV entity by pattern."""
@@ -3538,17 +4023,21 @@ class EVVehicleCommandView(HomeAssistantView):
                 if len(identifier) < 2:
                     continue
                 domain = identifier[0]
-                identifier_value = identifier[1]
-                if domain in self.TESLA_INTEGRATIONS:
-                    if len(str(identifier_value)) == 17 and not str(identifier_value).isdigit():
+                identifier_value = str(identifier[1])
+                if domain in TESLA_INTEGRATIONS:
+                    if len(identifier_value) == 17 and not identifier_value.isdigit():
+                        _LOGGER.debug(f"Found Tesla device: {device.name} with VIN {identifier_value}, looking for VIN {vehicle_vin}")
                         if vehicle_vin is None or identifier_value == vehicle_vin:
                             tesla_devices.append(device)
+                            _LOGGER.debug(f"Added device {device.name} to tesla_devices list")
                             break
 
         if not tesla_devices:
+            _LOGGER.debug(f"No Tesla devices found for VIN {vehicle_vin}")
             return None
 
         target_device = tesla_devices[0]
+        _LOGGER.debug(f"Using target device: {target_device.name} for pattern {entity_pattern}")
 
         pattern = re.compile(entity_pattern, re.IGNORECASE)
         for entity in entity_registry.entities.values():
@@ -3694,9 +4183,11 @@ class EVVehicleCommandView(HomeAssistantView):
         """Get current charging state."""
         # Tesla Fleet uses sensor.*_charging (no _state suffix)
         charging_entity = await self._get_tesla_ev_entity(r"sensor\..*_charging$", vehicle_vin)
+        _LOGGER.debug(f"Charging state check for VIN {vehicle_vin}: found entity {charging_entity}")
         if charging_entity:
             state = self._hass.states.get(charging_entity)
             if state and state.state not in ("unavailable", "unknown"):
+                _LOGGER.debug(f"Charging state for {charging_entity}: {state.state}")
                 return state.state.lower()
         return ""
 
@@ -3745,13 +4236,20 @@ class EVVehicleCommandView(HomeAssistantView):
             charge_switch_entity = await self._get_tesla_ev_entity(r"switch\..*_charge$", vehicle_vin)
             if charge_switch_entity:
                 try:
-                    await self._hass.services.async_call(
-                        "switch", "turn_on",
-                        {"entity_id": charge_switch_entity},
-                        blocking=True,
+                    # Use timeout to prevent hanging on slow Tesla API responses
+                    await asyncio.wait_for(
+                        self._hass.services.async_call(
+                            "switch", "turn_on",
+                            {"entity_id": charge_switch_entity},
+                            blocking=True,
+                        ),
+                        timeout=30.0
                     )
                     _LOGGER.info(f"Started charging via Fleet API: {charge_switch_entity}")
                     return True, "Charging started"
+                except asyncio.TimeoutError:
+                    _LOGGER.warning(f"Start charging command timed out (30s) - command may still be processing")
+                    return True, "Charging command sent (response timed out)"
                 except Exception as e:
                     _LOGGER.error(f"Fleet API start charging failed: {e}")
                     return False, f"Failed to start charging: {e}"
@@ -3797,13 +4295,20 @@ class EVVehicleCommandView(HomeAssistantView):
             charge_switch_entity = await self._get_tesla_ev_entity(r"switch\..*_charge$", vehicle_vin)
             if charge_switch_entity:
                 try:
-                    await self._hass.services.async_call(
-                        "switch", "turn_off",
-                        {"entity_id": charge_switch_entity},
-                        blocking=True,
+                    # Use timeout to prevent hanging on slow Tesla API responses
+                    await asyncio.wait_for(
+                        self._hass.services.async_call(
+                            "switch", "turn_off",
+                            {"entity_id": charge_switch_entity},
+                            blocking=True,
+                        ),
+                        timeout=30.0
                     )
                     _LOGGER.info(f"Stopped charging via Fleet API: {charge_switch_entity}")
                     return True, "Charging stopped"
+                except asyncio.TimeoutError:
+                    _LOGGER.warning(f"Stop charging command timed out (30s) - command may still be processing")
+                    return True, "Stop command sent (response timed out)"
                 except Exception as e:
                     _LOGGER.error(f"Fleet API stop charging failed: {e}")
                     return False, f"Failed to stop charging: {e}"
@@ -3924,7 +4429,13 @@ class EVVehicleCommandView(HomeAssistantView):
                     "error": f"Invalid command. Must be one of: {', '.join(valid_commands)}"
                 }, status=400)
 
+            # Get VIN from request body, or look up from vehicle_id in URL path
             vehicle_vin = data.get("vin")
+            if not vehicle_vin and vehicle_id:
+                # Map vehicle_id (sequential number) to VIN
+                vehicle_vin = self._get_vin_from_vehicle_id(vehicle_id)
+                _LOGGER.info(f"Mapped vehicle_id {vehicle_id} to VIN: {vehicle_vin}")
+
             success = False
             message = ""
 
@@ -4224,6 +4735,7 @@ class SolarSurplusConfigView(HomeAssistantView):
                 "sustained_surplus_minutes": 2,
                 "stop_delay_minutes": 5,
                 "dual_vehicle_strategy": "priority_first",
+                "min_battery_soc": 80,  # Battery must reach this % before EV surplus charging
             }
 
             if not store:
@@ -4277,6 +4789,8 @@ class SolarSurplusConfigView(HomeAssistantView):
             if "dual_vehicle_strategy" in updated_config:
                 if updated_config["dual_vehicle_strategy"] not in ("even", "priority_first", "priority_only"):
                     updated_config["dual_vehicle_strategy"] = "priority_first"
+            if "min_battery_soc" in updated_config:
+                updated_config["min_battery_soc"] = max(0, min(100, int(updated_config["min_battery_soc"])))
 
             # Save updated config (update key in existing _data, don't overwrite)
             if hasattr(store, '_data') and hasattr(store, 'async_save'):
@@ -4488,7 +5002,7 @@ class ChargingScheduleView(HomeAssistantView):
         entity_registry = er.async_get(self._hass)
         device_registry = dr.async_get(self._hass)
 
-        tesla_integrations = ["tesla_fleet", "teslemetry"]
+        tesla_integrations = TESLA_INTEGRATIONS
 
         for device in device_registry.devices.values():
             is_tesla_device = False
@@ -4984,6 +5498,7 @@ class PriceRecommendationView(HomeAssistantView):
             import_price_cents = 30.0  # Default
             export_price_cents = 8.0   # Default FiT
             price_source = "default"
+            tariff_info = {}  # Additional tariff metadata for response
 
             # Get electricity provider from config
             electricity_provider = self._config_entry.options.get(
@@ -5013,14 +5528,25 @@ class PriceRecommendationView(HomeAssistantView):
                     _LOGGER.debug(f"Could not read coordinator prices: {e}")
 
             elif electricity_provider in ("globird", "aemo_vpp"):
-                # Globird/AEMO VPP: Read from Tesla tariff
+                # Globird/AEMO VPP: Read from Tesla/custom tariff with real-time TOU
                 try:
                     tariff_prices = await self._fetch_tariff_prices()
                     if tariff_prices:
                         import_price_cents = tariff_prices.get("import_cents", import_price_cents)
                         export_price_cents = tariff_prices.get("export_cents", export_price_cents)
-                        price_source = "tesla_tariff"
-                        _LOGGER.debug(f"Using Tesla tariff prices: import={import_price_cents}c, export={export_price_cents}c")
+                        # Determine source based on tariff type
+                        if tariff_prices.get("is_custom"):
+                            price_source = "custom_tariff"
+                        else:
+                            price_source = "tesla_tariff"
+                        # Capture tariff metadata for response
+                        tariff_info = {
+                            "tariff_name": tariff_prices.get("tariff_name"),
+                            "utility": tariff_prices.get("utility"),
+                            "current_period": tariff_prices.get("current_period"),
+                            "is_custom": tariff_prices.get("is_custom", False),
+                        }
+                        _LOGGER.debug(f"Using {price_source} prices: import={import_price_cents}c, export={export_price_cents}c, period={tariff_info.get('current_period')}")
                 except Exception as e:
                     _LOGGER.debug(f"Could not fetch tariff prices: {e}")
 
@@ -5053,11 +5579,19 @@ class PriceRecommendationView(HomeAssistantView):
                 min_battery_soc=min_battery_soc,
             )
 
-            return web.json_response({
+            # Build response with tariff info if available
+            response = {
                 "success": True,
                 **recommendation,
                 "battery_soc": round(battery_soc, 1),
-            })
+                "price_source": price_source,
+            }
+
+            # Include tariff metadata for custom/Tesla tariff users
+            if tariff_info:
+                response["tariff_info"] = tariff_info
+
+            return web.json_response(response)
 
         except Exception as e:
             _LOGGER.error(f"Error getting price recommendation: {e}", exc_info=True)
@@ -5067,131 +5601,60 @@ class PriceRecommendationView(HomeAssistantView):
             }, status=500)
 
     async def _fetch_tariff_prices(self) -> dict | None:
-        """Fetch current prices from Tesla tariff (for Globird/non-API providers).
+        """Fetch current prices from Tesla/custom tariff (for Globird/non-API providers).
 
-        Returns dict with import_cents and export_cents, or None if unavailable.
+        Returns dict with import_cents, export_cents, and tariff metadata.
+        Uses real-time TOU calculation to ensure prices update when periods change.
         """
         try:
-            current_token, provider = get_tesla_api_token(self._hass, self._config_entry)
-            site_id = self._config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+            entry_data = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id, {})
 
-            if not site_id or not current_token:
-                return None
+            # Check stored tariff_schedule (from Tesla or custom tariff)
+            tariff_schedule = entry_data.get("tariff_schedule", {})
+            if tariff_schedule:
+                # Use real-time TOU calculation if TOU periods are defined
+                if tariff_schedule.get("tou_periods"):
+                    buy_cents, sell_cents, current_period = get_current_price_from_tariff_schedule(tariff_schedule)
+                    return {
+                        "import_cents": buy_cents,
+                        "export_cents": sell_cents,
+                        "current_period": current_period,
+                        "tariff_name": tariff_schedule.get("plan_name", "Custom Tariff"),
+                        "utility": tariff_schedule.get("utility", "Unknown"),
+                        "is_custom": tariff_schedule.get("is_custom", False),
+                    }
+                # Fallback to cached prices
+                elif tariff_schedule.get("buy_price") is not None:
+                    return {
+                        "import_cents": tariff_schedule.get("buy_price", 30.0),
+                        "export_cents": tariff_schedule.get("sell_price", 8.0),
+                        "current_period": tariff_schedule.get("current_period", "UNKNOWN"),
+                        "tariff_name": tariff_schedule.get("plan_name", "Tesla Tariff"),
+                        "utility": tariff_schedule.get("utility", "Tesla"),
+                        "is_custom": tariff_schedule.get("is_custom", False),
+                    }
 
-            session = async_get_clientsession(self._hass)
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Content-Type": "application/json",
-            }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            # Fallback: Fetch fresh from Tesla API
+            tariff_data = await fetch_tesla_tariff_schedule(self._hass, self._config_entry)
+            if tariff_data:
+                # Use real-time TOU calculation if available
+                if tariff_data.get("tou_periods"):
+                    buy_cents, sell_cents, current_period = get_current_price_from_tariff_schedule(tariff_data)
+                else:
+                    buy_cents = tariff_data.get("buy_price", 30.0)
+                    sell_cents = tariff_data.get("sell_price", 8.0)
+                    current_period = tariff_data.get("current_period", "UNKNOWN")
 
-            # Fetch site_info which contains tariff_content
-            async with session.get(
-                f"{api_base}/api/1/energy_sites/{site_id}/site_info",
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status != 200:
-                    return None
+                return {
+                    "import_cents": buy_cents,
+                    "export_cents": sell_cents,
+                    "current_period": current_period,
+                    "tariff_name": tariff_data.get("plan_name", "Tesla Tariff"),
+                    "utility": tariff_data.get("utility", "Tesla"),
+                    "is_custom": False,
+                }
 
-                data = await response.json()
-                site_info = data.get("response", {})
-
-            # Get tariff_content from site_info
-            tariff = site_info.get("tariff_content", {})
-            if not tariff:
-                return None
-
-            # Determine current TOU period and get prices
-            from datetime import datetime as dt
-            from zoneinfo import ZoneInfo
-
-            tz_name = site_info.get("installation_time_zone", "UTC")
-            try:
-                tz = ZoneInfo(tz_name)
-            except:
-                tz = ZoneInfo("UTC")
-            now = dt.now(tz)
-
-            # Find current season
-            seasons = tariff.get("seasons", {})
-            current_season = None
-            for season_name, season_data in seasons.items():
-                from_month = season_data.get("fromMonth", 0)
-                to_month = season_data.get("toMonth", 0)
-                if from_month and to_month:
-                    if from_month <= now.month <= to_month:
-                        current_season = season_name
-                        break
-                    elif from_month > to_month:  # Wraps around year (e.g., Nov-Feb)
-                        if now.month >= from_month or now.month <= to_month:
-                            current_season = season_name
-                            break
-
-            if not current_season:
-                current_season = list(seasons.keys())[0] if seasons else None
-
-            if not current_season:
-                return None
-
-            # Get TOU periods for current season
-            tou_periods = seasons.get(current_season, {}).get("tou_periods", {})
-
-            # Find which TOU period we're in based on current time
-            current_dow = now.weekday()  # 0=Monday, 6=Sunday
-            current_hour = now.hour
-            current_period_type = "OFF_PEAK"  # Default
-
-            for period_type, periods in tou_periods.items():
-                for period in periods:
-                    from_dow = period.get("fromDayOfWeek", 0)
-                    to_dow = period.get("toDayOfWeek", 6)
-                    from_hour = period.get("fromHour", 0)
-                    to_hour = period.get("toHour", 0)
-
-                    # Check day of week
-                    if from_dow <= current_dow <= to_dow:
-                        # Check hour (handle overnight periods)
-                        if from_hour <= to_hour:
-                            if from_hour <= current_hour < to_hour:
-                                current_period_type = period_type
-                                break
-                        else:  # Overnight period
-                            if current_hour >= from_hour or current_hour < to_hour:
-                                current_period_type = period_type
-                                break
-
-            # Get buy prices for current period
-            energy_charges = tariff.get("energy_charges", {})
-            season_charges = energy_charges.get(current_season, {})
-
-            # Handle both formats: direct values or nested under 'rates'
-            if "rates" in season_charges:
-                buy_rates = season_charges.get("rates", {})
-            else:
-                buy_rates = {k: v for k, v in season_charges.items() if isinstance(v, (int, float))}
-
-            buy_price = buy_rates.get(current_period_type, buy_rates.get("ALL", 0))
-
-            # Get sell (feed-in) prices - same structure as buy
-            sell_tariff = tariff.get("sell_tariff", {})
-            sell_energy_charges = sell_tariff.get("energy_charges", {})
-            sell_season_charges = sell_energy_charges.get(current_season, {})
-            if "rates" in sell_season_charges:
-                sell_rates = sell_season_charges.get("rates", {})
-            else:
-                sell_rates = {k: v for k, v in sell_season_charges.items() if isinstance(v, (int, float))}
-
-            sell_price = sell_rates.get(current_period_type, sell_rates.get("ALL", 0))
-
-            # Convert from $/kWh to c/kWh (multiply by 100)
-            import_cents = round(buy_price * 100, 2)
-            export_cents = round(sell_price * 100, 2)
-
-            return {
-                "import_cents": import_cents,
-                "export_cents": export_cents,
-            }
+            return None
 
         except Exception as e:
             _LOGGER.debug(f"Error fetching tariff prices: {e}")
@@ -5483,7 +5946,12 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
             store._data = stored_data
             await store.async_save()
 
-            _LOGGER.info(f"Price-level charging settings updated: enabled={settings.get('enabled')}")
+            _LOGGER.info(
+                f"💰 Price-level charging settings updated: enabled={settings.get('enabled')}, "
+                f"recovery_soc={settings.get('recovery_soc')}%, "
+                f"recovery_price={settings.get('recovery_price_cents')}c, "
+                f"opportunity_price={settings.get('opportunity_price_cents')}c"
+            )
 
             return web.json_response({
                 "success": True,
@@ -5831,6 +6299,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         expected_title = "PowerSync Globird"
     elif electricity_provider == "flow_power":
         expected_title = "PowerSync Flow Power"
+    elif electricity_provider == "octopus":
+        expected_title = "PowerSync Octopus"
     else:
         expected_title = "PowerSync Amber"
 
@@ -5860,10 +6330,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         flow_power_price_source in ("aemo_sensor", "aemo")
     )
 
+    # Check for Octopus Energy UK configuration
+    has_octopus = electricity_provider == "octopus" and bool(
+        entry.data.get(CONF_OCTOPUS_PRODUCT_CODE)
+    )
+
     if has_amber:
         _LOGGER.info("Running in Amber TOU Sync mode (provider: %s)", electricity_provider)
     elif has_flow_power_aemo:
         _LOGGER.info("Running in Flow Power mode with AEMO API pricing")
+    elif has_octopus:
+        _LOGGER.info("Running in Octopus Energy UK mode with dynamic pricing")
     elif aemo_spike_enabled:
         _LOGGER.info("Running in AEMO Spike Detection only mode (%s)", electricity_provider)
     else:
@@ -6153,6 +6630,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error("Failed to initialize Solcast coordinator: %s", e)
             solcast_coordinator = None
 
+    # Initialize Octopus Energy UK Price Coordinator if configured
+    octopus_coordinator = None
+    if has_octopus:
+        octopus_product_code = entry.data.get(CONF_OCTOPUS_PRODUCT_CODE)
+        octopus_tariff_code = entry.data.get(CONF_OCTOPUS_TARIFF_CODE)
+        octopus_region = entry.data.get(CONF_OCTOPUS_REGION, "C")
+        octopus_export_product_code = entry.data.get(CONF_OCTOPUS_EXPORT_PRODUCT_CODE)
+        octopus_export_tariff_code = entry.data.get(CONF_OCTOPUS_EXPORT_TARIFF_CODE)
+
+        if octopus_product_code and octopus_tariff_code:
+            octopus_coordinator = OctopusPriceCoordinator(
+                hass,
+                product_code=octopus_product_code,
+                tariff_code=octopus_tariff_code,
+                gsp_region=octopus_region,
+                export_product_code=octopus_export_product_code,
+                export_tariff_code=octopus_export_tariff_code,
+            )
+            try:
+                await octopus_coordinator.async_config_entry_first_refresh()
+                _LOGGER.info(
+                    "Octopus Energy Coordinator initialized: product=%s, tariff=%s, region=%s",
+                    octopus_product_code,
+                    octopus_tariff_code,
+                    octopus_region,
+                )
+            except Exception as e:
+                _LOGGER.error("Failed to initialize Octopus coordinator: %s", e)
+                octopus_coordinator = None
+        else:
+            _LOGGER.warning("Octopus mode enabled but product/tariff codes not configured")
+
     # Initialize persistent storage for data that survives HA restarts
     # (like Teslemetry's RestoreEntity pattern for export rule state)
     store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}.{entry.entry_id}")
@@ -6181,6 +6690,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "aemo_spike_manager": aemo_spike_manager,
         "aemo_sensor_coordinator": aemo_sensor_coordinator,  # For Flow Power AEMO-only mode
         "solcast_coordinator": solcast_coordinator,  # For Solcast solar forecasting
+        "octopus_coordinator": octopus_coordinator,  # For Octopus Energy UK pricing
         "ws_client": ws_client,  # Store for cleanup on unload
         "entry": entry,
         "auto_sync_cancel": None,  # Will store the timer cancel function
@@ -7060,16 +7570,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             convert_amber_to_tesla_tariff,
             extract_most_recent_actual_interval,
             compare_forecast_types,
+            detect_price_spikes,
         )
 
-        # Determine price source: AEMO API or Amber
+        # Determine price source: AEMO API, Octopus, or Amber
         # Support both "aemo_sensor" (legacy) and "aemo" (new) price source names
         use_aemo_sensor = (
             aemo_sensor_coordinator is not None and
             flow_power_price_source in ("aemo_sensor", "aemo")
         )
 
-        if use_aemo_sensor:
+        # Check for Octopus Energy UK pricing source
+        use_octopus = (
+            octopus_coordinator is not None and
+            electricity_provider_check == "octopus"
+        )
+
+        if use_octopus:
+            _LOGGER.info("🐙 Using Octopus Energy UK for pricing data")
+        elif use_aemo_sensor:
             _LOGGER.info("📊 Using AEMO API for pricing data")
         else:
             _LOGGER.info("🟠 Using Amber for pricing data")
@@ -7083,7 +7602,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         general_price = None
         feedin_price = None
 
-        if use_aemo_sensor:
+        if use_octopus:
+            # Octopus Energy UK mode: Refresh Octopus coordinator
+            await octopus_coordinator.async_request_refresh()
+
+            if not octopus_coordinator.data:
+                _LOGGER.error("No Octopus API data available")
+                return
+
+            # Current price from Octopus API data
+            current_prices = octopus_coordinator.data.get("current", [])
+            if current_prices:
+                current_actual_interval = {'general': None, 'feedIn': None}
+                for price in current_prices:
+                    channel = price.get('channelType')
+                    if channel in ['general', 'feedIn']:
+                        current_actual_interval[channel] = price
+                general_price = current_actual_interval.get('general', {}).get('perKwh') if current_actual_interval.get('general') else None
+                feedin_price = current_actual_interval.get('feedIn', {}).get('perKwh') if current_actual_interval.get('feedIn') else None
+                _LOGGER.info(f"🐙 Using Octopus API price for current interval: general={general_price:.2f}p/kWh")
+        elif use_aemo_sensor:
             # AEMO mode: Refresh AEMO coordinator
             await aemo_sensor_coordinator.async_request_refresh()
 
@@ -7138,7 +7676,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info(f"🔄 Price changed - proceeding with re-sync")
 
         # Get forecast data from appropriate coordinator
-        if use_aemo_sensor:
+        if use_octopus:
+            # Octopus coordinator already refreshed above
+            forecast_data = octopus_coordinator.data.get("forecast", [])
+            if not forecast_data:
+                _LOGGER.error("No Octopus forecast data available from API")
+                return
+            _LOGGER.info(f"Using Octopus API forecast: {len(forecast_data) // 2} periods")
+        elif use_aemo_sensor:
             # AEMO coordinator already refreshed above
             forecast_data = aemo_sensor_coordinator.data.get("forecast", [])
             if not forecast_data:
@@ -7170,6 +7715,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if (
             sync_mode == 'initial_forecast' and
             not use_aemo_sensor and
+            not use_octopus and  # Octopus doesn't have multiple forecast types
             forecast_discrepancy_alert_enabled and
             forecast_data
         ):
@@ -7201,6 +7747,78 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                 except Exception as notify_err:
                     _LOGGER.debug(f"Could not send forecast discrepancy notification: {notify_err}")
+
+        # Check for price spikes (extreme prices in settled/actual data)
+        # Only runs on REST API sync (Stage 3/4 at :35/:60) when actual prices are available
+        # This avoids false alerts from potentially inaccurate forecast prices
+        # Works for all providers with forecast data (Amber, Octopus, Flow Power, etc.)
+        price_spike_alert_enabled = entry.options.get(
+            CONF_PRICE_SPIKE_ALERT,
+            entry.data.get(CONF_PRICE_SPIKE_ALERT, False)
+        )
+        if (
+            sync_mode == 'rest_api_check' and
+            price_spike_alert_enabled and
+            forecast_data
+        ):
+            import_threshold = entry.options.get(
+                CONF_PRICE_SPIKE_IMPORT_THRESHOLD,
+                entry.data.get(CONF_PRICE_SPIKE_IMPORT_THRESHOLD, DEFAULT_PRICE_SPIKE_IMPORT_THRESHOLD)
+            )
+            export_threshold = entry.options.get(
+                CONF_PRICE_SPIKE_EXPORT_THRESHOLD,
+                entry.data.get(CONF_PRICE_SPIKE_EXPORT_THRESHOLD, DEFAULT_PRICE_SPIKE_EXPORT_THRESHOLD)
+            )
+            spike_result = detect_price_spikes(
+                forecast_data,
+                import_threshold=import_threshold,
+                export_threshold=export_threshold,
+                forecast_type=forecast_type
+            )
+
+            # Send notifications for import spikes
+            import_spikes = spike_result.get("import_spikes", {})
+            if import_spikes.get("has_spike"):
+                max_price = import_spikes.get("max_price", 0)
+                spike_count = import_spikes.get("count", 0)
+                spike_details = import_spikes.get("details", [])
+
+                try:
+                    from .automations.actions import _send_expo_push
+                    if spike_details:
+                        first_spike = spike_details[0]
+                        spike_time = first_spike.get("time", "").split("T")[1][:5] if "T" in first_spike.get("time", "") else ""
+                        await _send_expo_push(
+                            hass,
+                            "Import Price Spike Alert",
+                            f"Settled prices show {spike_count} intervals above ${import_threshold/100:.0f}/kWh import. "
+                            f"Max: ${max_price/100:.2f}/kWh at {spike_time}. "
+                            f"Consider reducing grid usage during these periods.",
+                        )
+                except Exception as notify_err:
+                    _LOGGER.debug(f"Could not send import spike notification: {notify_err}")
+
+            # Send notifications for export spikes
+            export_spikes = spike_result.get("export_spikes", {})
+            if export_spikes.get("has_spike"):
+                max_price = export_spikes.get("max_price", 0)
+                spike_count = export_spikes.get("count", 0)
+                spike_details = export_spikes.get("details", [])
+
+                try:
+                    from .automations.actions import _send_expo_push
+                    if spike_details:
+                        first_spike = spike_details[0]
+                        spike_time = first_spike.get("time", "").split("T")[1][:5] if "T" in first_spike.get("time", "") else ""
+                        await _send_expo_push(
+                            hass,
+                            "Export Price Spike Alert",
+                            f"Settled prices show {spike_count} intervals above ${export_threshold/100:.2f}/kWh export. "
+                            f"Max: ${max_price/100:.2f}/kWh at {spike_time}. "
+                            f"Great time to export power to the grid!",
+                        )
+                except Exception as notify_err:
+                    _LOGGER.debug(f"Could not send export spike notification: {notify_err}")
 
         # Fetch Powerwall timezone from site_info
         # This ensures correct timezone handling for TOU schedule alignment
@@ -7681,6 +8299,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.debug("Solar curtailment is disabled, skipping check")
             return
 
+        # Skip if EV charging has overridden curtailment to allow full solar production
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        if entry_data.get("ev_curtailment_override"):
+            _LOGGER.info("☀️ Solar curtailment skipped - EV charging using solar surplus")
+            return
+
         # Skip if no Amber coordinator (AEMO-only mode) - curtailment requires Amber prices
         if not amber_coordinator:
             _LOGGER.debug("Solar curtailment skipped - no Amber coordinator (AEMO-only mode)")
@@ -7976,6 +8600,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         if not curtailment_enabled:
             _LOGGER.debug("Solar curtailment is disabled, skipping check")
+            return
+
+        # Skip if EV charging has overridden curtailment to allow full solar production
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        if entry_data.get("ev_curtailment_override"):
+            _LOGGER.info("☀️ Solar curtailment skipped - EV charging using solar surplus")
             return
 
         _LOGGER.info("=== Starting solar curtailment check (WebSocket event-driven) ===")
@@ -9391,31 +10021,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             # Restore backup reserve if it was saved during force charge OR force discharge
             # For discharge: only restore if current SoC > saved reserve (to prevent grid imports)
-            saved_backup_reserve = (
-                force_discharge_state.get("saved_backup_reserve") or
-                force_charge_state.get("saved_backup_reserve")
-            )
+            # Note: Use explicit None check, not 'or', because 0% is a valid saved value
+            saved_backup_reserve = force_discharge_state.get("saved_backup_reserve")
+            if saved_backup_reserve is None:
+                saved_backup_reserve = force_charge_state.get("saved_backup_reserve")
             was_discharging = force_discharge_state.get("active")
 
             if saved_backup_reserve is None:
-                # Try to get current backup reserve from API to check if it's at extreme values
-                _LOGGER.warning("No saved backup reserve found - checking current value")
-                try:
-                    async with session.get(
-                        f"{api_base}/api/1/energy_sites/{site_id}/site_info",
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            current_reserve = data.get("response", {}).get("backup_reserve_percent")
-                            _LOGGER.info(f"Current backup reserve is {current_reserve}%")
-                            # If it's at 100% (force charge) or 0% (force discharge), restore to default 20%
-                            if current_reserve in (0, 100):
-                                saved_backup_reserve = 20
-                                _LOGGER.info(f"Backup reserve at {current_reserve}% from force mode - will restore to default 20%")
-                except Exception as e:
-                    _LOGGER.warning(f"Could not check current backup reserve: {e}")
+                # No saved value - this shouldn't happen normally, but handle gracefully
+                # DON'T assume 0% means "from force mode" - user may have intentionally set 0%
+                _LOGGER.warning("No saved backup reserve found - will not change current setting")
+                # Skip backup reserve restoration entirely rather than guessing
 
             if saved_backup_reserve is not None:
                 # For discharge restore: check if SoC > backup reserve to prevent imports
@@ -9524,7 +10140,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # ======================================================================
 
     async def handle_set_backup_reserve(call: ServiceCall) -> None:
-        """Set the Powerwall backup reserve percentage."""
+        """Set the battery backup reserve percentage.
+
+        Supports both Tesla Powerwall and SigEnergy systems.
+        """
         percent = call.data.get("percent")
         if percent is None:
             _LOGGER.error("Missing 'percent' parameter for set_backup_reserve")
@@ -9541,34 +10160,77 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         _LOGGER.info(f"🔋 Setting backup reserve to {percent}%")
 
-        try:
-            current_token, provider = get_tesla_api_token(hass, entry)
-            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
-            if not site_id or not current_token:
-                _LOGGER.error("Missing Tesla site ID or token for set_backup_reserve")
-                return
+        # Check if this is a SigEnergy system
+        is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
 
-            session = async_get_clientsession(hass)
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Content-Type": "application/json",
-            }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+        if is_sigenergy:
+            # SigEnergy via Modbus
+            try:
+                from .inverters.sigenergy import SigenergyController
 
-            async with session.post(
-                f"{api_base}/api/1/energy_sites/{site_id}/backup",
-                headers=headers,
-                json={"backup_reserve_percent": percent},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 200:
-                    _LOGGER.info(f"✅ Backup reserve set to {percent}%")
+                modbus_host = entry.options.get(
+                    CONF_SIGENERGY_MODBUS_HOST,
+                    entry.data.get(CONF_SIGENERGY_MODBUS_HOST)
+                )
+                if not modbus_host:
+                    _LOGGER.error("SigEnergy Modbus host not configured for set_backup_reserve")
+                    return
+
+                modbus_port = entry.options.get(
+                    CONF_SIGENERGY_MODBUS_PORT,
+                    entry.data.get(CONF_SIGENERGY_MODBUS_PORT, 502)
+                )
+                modbus_slave_id = entry.options.get(
+                    CONF_SIGENERGY_MODBUS_SLAVE_ID,
+                    entry.data.get(CONF_SIGENERGY_MODBUS_SLAVE_ID, 247)
+                )
+
+                controller = SigenergyController(
+                    host=modbus_host,
+                    port=modbus_port,
+                    slave_id=modbus_slave_id,
+                )
+
+                success = await controller.set_backup_reserve(percent)
+                await controller.disconnect()
+
+                if success:
+                    _LOGGER.info(f"✅ SigEnergy backup reserve set to {percent}%")
                 else:
-                    text = await response.text()
-                    _LOGGER.error(f"Failed to set backup reserve: {response.status} - {text}")
+                    _LOGGER.error(f"Failed to set SigEnergy backup reserve")
 
-        except Exception as e:
-            _LOGGER.error(f"Error setting backup reserve: {e}", exc_info=True)
+            except Exception as e:
+                _LOGGER.error(f"Error setting SigEnergy backup reserve: {e}", exc_info=True)
+        else:
+            # Tesla Powerwall via Fleet API
+            try:
+                current_token, provider = get_tesla_api_token(hass, entry)
+                site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+                if not site_id or not current_token:
+                    _LOGGER.error("Missing Tesla site ID or token for set_backup_reserve")
+                    return
+
+                session = async_get_clientsession(hass)
+                headers = {
+                    "Authorization": f"Bearer {current_token}",
+                    "Content-Type": "application/json",
+                }
+                api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+                async with session.post(
+                    f"{api_base}/api/1/energy_sites/{site_id}/backup",
+                    headers=headers,
+                    json={"backup_reserve_percent": percent},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        _LOGGER.info(f"✅ Tesla backup reserve set to {percent}%")
+                    else:
+                        text = await response.text()
+                        _LOGGER.error(f"Failed to set Tesla backup reserve: {response.status} - {text}")
+
+            except Exception as e:
+                _LOGGER.error(f"Error setting Tesla backup reserve: {e}", exc_info=True)
 
     async def handle_set_operation_mode(call: ServiceCall) -> None:
         """Set the Powerwall operation mode."""
@@ -10105,6 +10767,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(AutomationGroupsView(hass))
     _LOGGER.info("⚡ Automations HTTP endpoints registered at /api/power_sync/automations")
 
+    # Register HTTP endpoints for Custom Tariff (for non-Amber users)
+    hass.http.register_view(CustomTariffView(hass))
+    hass.http.register_view(CustomTariffTemplatesView(hass))
+    _LOGGER.info("💰 Custom tariff HTTP endpoints registered at /api/power_sync/custom_tariff")
+
     # Register HTTP endpoint for push token registration
     hass.http.register_view(PushTokenRegisterView(hass))
     _LOGGER.info("📱 Push token registration endpoint registered at /api/power_sync/push/register")
@@ -10197,6 +10864,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     set_ev_charging_coordinator(ev_charging_coordinator)
     hass.data[DOMAIN][entry.entry_id]["ev_charging_coordinator"] = ev_charging_coordinator
     _LOGGER.info("🔄 EV charging mode coordinator initialized (combines multiple modes)")
+
+    # ======================================================================
+    # FETCH TESLA TARIFF ON STARTUP (for non-Amber users like Globird)
+    # ======================================================================
+    # For users who rely on Tesla's built-in tariff schedule (set in the Tesla app),
+    # we need to fetch the tariff on startup to populate tariff_schedule with TOU periods.
+    # This enables the EV charging planner to correctly identify cheap/free periods.
+    electricity_provider = entry.options.get(
+        CONF_ELECTRICITY_PROVIDER,
+        entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+    )
+    if electricity_provider in ("globird", "aemo_vpp", "other"):
+        _LOGGER.info(f"📊 Fetching Tesla tariff schedule for {electricity_provider} user...")
+        try:
+            tariff_data = await fetch_tesla_tariff_schedule(hass, entry)
+            if tariff_data:
+                tou_count = len(tariff_data.get("tou_periods", {}))
+                _LOGGER.info(
+                    f"✅ Tesla tariff initialized: {tariff_data.get('plan_name', 'Unknown')} "
+                    f"with {tou_count} TOU periods"
+                )
+                # Log the rates for each period
+                buy_rates = tariff_data.get("buy_rates", {})
+                for period_name, rate in buy_rates.items():
+                    rate_cents = rate * 100 if rate < 1 else rate
+                    _LOGGER.info(f"  💰 {period_name}: {rate_cents:.1f}c/kWh")
+            else:
+                _LOGGER.warning(
+                    "⚠️ Could not fetch Tesla tariff on startup. "
+                    "EV charging planner may not have TOU schedule available. "
+                    "Ensure your tariff is configured in the Tesla app."
+                )
+        except Exception as e:
+            _LOGGER.error(f"Error fetching Tesla tariff on startup: {e}")
 
     # ======================================================================
     # SYNC BATTERY HEALTH SERVICE (from mobile app TEDAPI scans)
@@ -10652,6 +11353,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     automation_store = AutomationStore(hass)
     await automation_store.async_load()
 
+    # Handle initial custom tariff from config flow (if present)
+    initial_custom_tariff = entry.data.get("initial_custom_tariff")
+    if initial_custom_tariff:
+        # Store the custom tariff in automation_store
+        automation_store.set_custom_tariff(initial_custom_tariff)
+        await automation_store.async_save()
+        _LOGGER.info(f"Initial custom tariff stored: {initial_custom_tariff.get('name')}")
+
+        # Remove from config_entry.data (it's now in automation_store)
+        new_data = dict(entry.data)
+        del new_data["initial_custom_tariff"]
+        hass.config_entries.async_update_entry(entry, data=new_data)
+
+    # For non-Amber users, populate tariff_schedule from custom_tariff
+    electricity_provider = entry.options.get(
+        CONF_ELECTRICITY_PROVIDER,
+        entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+    )
+    if electricity_provider in ("globird", "aemo_vpp", "other"):
+        # Try to get custom tariff from automation_store
+        custom_tariff = automation_store.get_custom_tariff()
+        if custom_tariff:
+            tariff_schedule = convert_custom_tariff_to_schedule(custom_tariff)
+            hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = tariff_schedule
+            _LOGGER.info(f"Custom tariff loaded for {electricity_provider}: {custom_tariff.get('name')}")
+
     automation_engine = AutomationEngine(hass, automation_store, entry)
 
     # Store automation components in hass.data
@@ -10721,6 +11448,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 amber_prices = entry_data.get("amber_prices", {})
                 if amber_prices:
                     current_price = amber_prices.get("import_cents")
+
+            # Fallback to Tesla tariff schedule (for Globird/AEMO VPP users)
+            if current_price is None:
+                tariff_schedule = entry_data.get("tariff_schedule", {})
+                if tariff_schedule:
+                    # buy_price is already in cents from fetch_tesla_tariff_schedule
+                    current_price = tariff_schedule.get("buy_price")
+
+            # Fallback to Sigenergy tariff (for Sigenergy users with Amber)
+            if current_price is None:
+                sigenergy_tariff = entry_data.get("sigenergy_tariff", {})
+                if sigenergy_tariff:
+                    buy_prices = sigenergy_tariff.get("buy_prices", [])
+                    if buy_prices:
+                        # Find current time slot price
+                        # Format: [{"timeRange": "10:00-10:30", "price": 25.0}, ...]
+                        now = datetime.now()
+                        current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
+                        for slot in buy_prices:
+                            time_range = slot.get("timeRange", "")
+                            if time_range.startswith(current_time):
+                                current_price = slot.get("price")
+                                break
 
             # Evaluate auto-schedule executor (handles Smart Schedule mode with per-vehicle settings)
             executor = get_auto_schedule_executor()

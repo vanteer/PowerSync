@@ -1,0 +1,256 @@
+# HA Dashboard/abc_troubleshooting_dashboard.yaml
+title: ABC Troubleshooting
+views:
+  - title: ABC Status
+    path: abc_status
+    icon: mdi:bug
+    cards:
+      - type: vertical-stack
+        cards:
+          - type: custom:button-card
+            entity: switch.power_sync_advanced_battery_control
+            name: Advanced Battery Control
+            show_state: true
+            styles:
+              card:
+                - height: 80px
+                - border-radius: 12px
+              grid:
+                - grid-template-areas: '"i n" "i s"'
+                - grid-template-columns: 60px 1fr
+              icon:
+                - width: 40px
+                - color: |
+                    [[[
+                      return entity.state === 'on' ? 'var(--green-color)' : 'var(--disabled-text-color)';
+                    ]]]
+          - type: markdown
+            content: >
+              **Toggle Usage:** Turn this switch ON to enable the Advanced Battery
+              Control state machine. When active, it manages Tesla operation
+              modes and enforces safety guardrails to maximize export profit and
+              protect overnight energy needs.
+          - type: custom:button-card
+            entity: switch.power_sync_advanced_battery_control
+            name: Controller State
+            show_name: true
+            show_label: true
+            label: |
+              [[[
+                return entity.attributes.state || 'INACTIVE';
+              ]]]
+            styles:
+              card:
+                - background: |
+                    [[[
+                      const state = entity.attributes.state;
+                      if (state === 'SELLING') return 'rgba(76, 175, 80, 0.1)';
+                      if (state === 'BUFFER') return 'rgba(33, 150, 243, 0.1)';
+                      return 'rgba(158, 158, 158, 0.1)';
+                    ]]]
+              label:
+                - font-size: 24px
+                - font-weight: bold
+                - color: |
+                    [[[
+                      const state = entity.attributes.state;
+                      if (state === 'SELLING') return 'var(--green-color)';
+                      if (state === 'BUFFER') return 'var(--blue-color)';
+                      return 'var(--primary-text-color)';
+                    ]]]
+          - type: markdown
+            content: >
+              **State Indicator:** This card shows the active ABC state (NORMAL,
+              SELLING, or BUFFER). It is a status indicator and not an
+              interactive button. States change automatically based on prices,
+              SOC, and your configured targets.
+          - type: markdown
+            content: |
+              **Reason:** {{ state_attr('switch.power_sync_advanced_battery_control', 'reason') or 'N/A' }}
+
+              **SOC:** {{ state_attr('switch.power_sync_advanced_battery_control', 'soc') | float(0) | round(1) }}%
+              **Overnight Target:** {{ state_attr('switch.power_sync_advanced_battery_control', 'overnight_target_soc') | float(0) | round(1) }}%
+
+              **Current Export:** {{ (state_attr('switch.power_sync_advanced_battery_control', 'export_price') | float(0) * 1) | round(1) }}¢
+              **Current Import:** {{ (state_attr('switch.power_sync_advanced_battery_control', 'import_price') | float(0) * 1) | round(1) }}¢
+
+              **Flags:**
+              - Very High Price Mode: {{ state_attr('switch.power_sync_advanced_battery_control', 'very_high_price_mode') }}
+              - Evening Peak Window: {{ state_attr('switch.power_sync_advanced_battery_control', 'evening_peak_window') }}
+              - Daytime Spike Allowed: {{ state_attr('switch.power_sync_advanced_battery_control', 'daytime_spike_allowed') }}
+
+              **Hardware Status:**
+              - Operation Mode: {{ state_attr('switch.power_sync_advanced_battery_control', 'actual_mode') }}
+              - Backup Reserve: {{ state_attr('switch.power_sync_advanced_battery_control', 'actual_backup') }}%
+              - Grid Charging: {{ 'Disabled' if state_attr('switch.power_sync_advanced_battery_control', 'actual_grid_charging') == True else 'Enabled' if state_attr('switch.power_sync_advanced_battery_control', 'actual_grid_charging') == False else 'Unknown' }}
+              - Export Rule: {{ state_attr('switch.power_sync_advanced_battery_control', 'actual_export_rule') }} (Target: {{ state_attr('switch.power_sync_advanced_battery_control', 'expected_export_rule') }})
+
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.power_sync_current_export_price_cents
+            name: Export
+            unit: ¢/kWh
+            min: -100
+            max: 500
+            needle: true
+            severity:
+              red: -100
+              yellow: 0
+              green: 10
+            card_mod:
+              style: |
+                ha-card {
+                  height: 140px;
+                }
+          - type: gauge
+            entity: sensor.power_sync_battery_level
+            name: SOC
+            min: 0
+            max: 100
+            needle: true
+            severity:
+              red: 0
+              yellow: 20
+              green: 50
+            card_mod:
+              style: |
+                ha-card {
+                  height: 140px;
+                }
+
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: ABC Variables
+        graph_span: 4h
+        series:
+          - entity: sensor.power_sync_battery_level
+            name: SOC
+            yaxis_id: soc
+            stroke_width: 1
+            color: '#2196F3'
+          - entity: switch.power_sync_advanced_battery_control
+            attribute: overnight_target_soc
+            name: Target SOC
+            yaxis_id: soc
+            stroke_width: 1
+            curve: stepline
+            color: '#FF9800'
+          - entity: sensor.power_sync_current_export_price_cents
+            name: Export Price
+            yaxis_id: price
+            color: '#4CAF50'
+            stroke_width: 1
+            unit: "¢"
+        yaxis:
+          - id: soc
+            min: 0
+            max: 100
+          - id: price
+            opposite: true
+            decimals: 1
+            apex_config:
+              forceNiceScale: true
+
+  - title: ABC Configuration
+    path: abc_config
+    icon: mdi:cog
+    cards:
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: >
+              ### SOC & Load Targets
+
+              **Emergency Min SOC:** Hard floor for backup; system never
+              discharges below this.
+
+              **High Price Min SOC:** The minimum SOC allowed when selling
+              during extreme price events.
+
+              **Overnight Load:** Expected average home load (Watts) during sleep
+              hours.
+
+              **Evening Load:** Expected baseline home load (Watts) during
+              active evening hours.
+
+              **Transient Duration:** How long (minutes) to project current
+              cooking spikes beyond the baseline evening load.
+          - type: entities
+            entities:
+              - entity: number.power_sync_abc_emergency_min_soc
+                name: Emergency Min SOC (%)
+              - entity: number.power_sync_abc_high_price_min_soc
+                name: High Price Min SOC (%)
+              - entity: number.power_sync_abc_overnight_load
+                name: Overnight Load (Sleep)
+              - entity: number.power_sync_abc_evening_load
+                name: Evening Load (Active)
+              - entity: number.power_sync_abc_transient_duration
+                name: Transient Duration (min)
+          - type: markdown
+            content: >
+              ### Price Thresholds (c/kWh)
+
+              **Daytime Spike Export:** Export price trigger for daytime selling
+              (guarded by solar forecast).
+
+              **Export Minimum Earnings:** Stop exporting if earnings drop below
+              this value (e.g., 0 to stop when you pay to export).
+
+              **Very High Export:** Extreme export price threshold that ignores
+              the overnight target logic.
+
+              **Import Stabilised:** Price below which the system exits buffer
+              mode after a spike.
+          - type: entities
+            entities:
+              - entity: number.power_sync_abc_day_spike_export_threshold
+                name: Daytime Spike Export
+              - entity: number.power_sync_abc_export_min_threshold
+                name: Export Minimum Earnings
+              - entity: number.power_sync_abc_very_high_export_threshold
+                name: Very High Export
+              - entity: number.power_sync_abc_import_stabilised_threshold
+                name: Import Stabilised
+          - type: markdown
+            content: >
+              ### Windows & Timers
+
+              **Night Start:** The time when the "Active Phase" ends and "Sleep
+              Phase" begins (baseline load drops).
+
+              **Night End:** Fallback time for sunrise if Solcast is
+              unavailable.
+
+              **Evening Peak Start/End:** Window where selling is prioritized.
+
+              **Min Buffer Time:** Minimum duration to hold energy after a
+              spike.
+
+              **Min Mode Change:** Debounce timer for Tesla API changes.
+          - type: entities
+            entities:
+              - entity: time.power_sync_abc_night_start
+                name: Night Start
+              - entity: time.power_sync_abc_night_end
+                name: Night End
+              - entity: time.power_sync_abc_evening_peak_start
+                name: Evening Peak Start
+              - entity: time.power_sync_abc_evening_peak_end
+                name: Evening Peak End
+              - entity: number.power_sync_abc_buffer_minimum_minutes
+                name: Min Buffer Time (min)
+              - entity: number.power_sync_abc_mode_change_min_seconds
+                name: Min Mode Change Interval (s)
+          - type: markdown
+            content: >
+              ### Guardrails
+
+              **Use Solcast Guardrail:** Enable to prevent daytime selling if
+              the solar forecast is too low to meet tonight's target.
+          - type: entities
+            entities:
+              - entity: switch.power_sync_abc_solcast_guardrail
+                name: Use Solcast Guardrail
